@@ -38,6 +38,7 @@ class Main(star.Star):
         self.data_dir = Path(get_astrbot_data_path()) / "plugin_data" / PLUGIN_NAME
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.pending_additions: dict[tuple[str, str, str], tuple[str, float]] = {}
+        self.draw_history: dict[tuple[str, str, str], set[str]] = {}
 
     async def _store_image(
         self,
@@ -45,7 +46,7 @@ class Main(star.Star):
         platform_id: str,
         group_id: str,
         gallery_name: str,
-    ) -> bool:
+    ) -> tuple[Path, bool]:
         """Validate, deduplicate, and store one image.
 
         Args:
@@ -55,7 +56,8 @@ class Main(star.Star):
             gallery_name: Validated gallery name.
 
         Returns:
-            True when a new image was stored, or False when it was a duplicate.
+            Stored image path and whether a new image was written. The boolean is
+            False when the image was already present.
 
         Raises:
             ValueError: The payload is empty, too large, or not a supported image.
@@ -94,7 +96,7 @@ class Main(star.Star):
                 return False
             return True
 
-        return await asyncio.to_thread(write_exclusive)
+        return image_path, await asyncio.to_thread(write_exclusive)
 
     def _gallery_images(
         self,
@@ -131,7 +133,13 @@ class Main(star.Star):
         Yields:
             AstrBot message results for recognized commands.
         """
-        text = event.message_str.strip()
+        message_components = event.get_messages()
+        plain_text = "".join(
+            component.text
+            for component in message_components
+            if isinstance(component, Comp.Plain)
+        )
+        text = plain_text.strip() or event.message_str.strip()
         platform_id = (
             re.sub(r"[^A-Za-z0-9_-]", "_", str(event.get_platform_name()))[:80]
             or "unknown"
@@ -149,7 +157,7 @@ class Main(star.Star):
 
         direct_images = [
             component
-            for component in event.get_messages()
+            for component in message_components
             if isinstance(component, Comp.Image)
         ]
 
@@ -184,15 +192,18 @@ class Main(star.Star):
 
             saved_count = 0
             duplicate_count = 0
+            saved_paths: list[Path] = []
             try:
                 for source in image_sources:
-                    if await self._store_image(
+                    image_path, is_new = await self._store_image(
                         source,
                         platform_id,
                         group_id,
                         gallery_name,
-                    ):
+                    )
+                    if is_new:
                         saved_count += 1
+                        saved_paths.append(image_path)
                     else:
                         duplicate_count += 1
             except Exception as exc:
@@ -206,8 +217,14 @@ class Main(star.Star):
                     if duplicate_count
                     else ""
                 )
-                yield event.plain_result(
-                    f"已添加 {saved_count} 张图片到“{gallery_name}”{duplicate_note}。"
+                yield event.chain_result(
+                    [
+                        *[
+                            Comp.Image.fromFileSystem(str(path.resolve()))
+                            for path in saved_paths
+                        ],
+                        Comp.Plain(f"已添加到{gallery_name}{duplicate_note}"),
+                    ]
                 )
             else:
                 yield event.plain_result("这张图片已经在图库里了。")
@@ -224,15 +241,21 @@ class Main(star.Star):
 
             image_source = direct_images[0]
             try:
-                if await self._store_image(
+                image_path, is_new = await self._store_image(
                     image_source,
                     platform_id,
                     group_id,
                     gallery_name,
-                ):
-                    result_text = f"已添加图片到“{gallery_name}”。"
+                )
+                if is_new:
+                    result = event.chain_result(
+                        [
+                            Comp.Image.fromFileSystem(str(image_path.resolve())),
+                            Comp.Plain(f"已添加到{gallery_name}"),
+                        ]
+                    )
                 else:
-                    result_text = "这张图片已经在图库里了。"
+                    result = event.plain_result("这张图片已经在图库里了。")
             except Exception as exc:
                 logger.exception("Failed to save a pending gallery image")
                 yield event.plain_result(f"图片保存失败：{exc}")
@@ -240,7 +263,7 @@ class Main(star.Star):
             finally:
                 self.pending_additions.pop(pending_key, None)
 
-            yield event.plain_result(result_text)
+            yield result
             return
 
         delete_match = re.fullmatch(r"(?:删除|#清理)\s*(.+)", text)
@@ -262,6 +285,7 @@ class Main(star.Star):
 
             image_count = len(self._gallery_images(platform_id, group_id, gallery_name))
             await asyncio.to_thread(shutil.rmtree, gallery_dir)
+            self.draw_history.pop((platform_id, group_id, gallery_name), None)
             yield event.plain_result(
                 f"已删除“{gallery_name}”图库，共清理 {image_count} 张图片。"
             )
@@ -300,7 +324,54 @@ class Main(star.Star):
                 yield event.plain_result(f"“{gallery_name}”图库里还没有图片。")
                 return
 
-            selected = random.sample(images, min(count, len(images)))
-            yield event.chain_result(
-                [Comp.Image.fromFileSystem(str(path.resolve())) for path in selected]
+            actual_count = min(count, len(images))
+            history_key = (platform_id, group_id, gallery_name)
+            used_paths = self.draw_history.setdefault(history_key, set())
+            current_paths = {str(path.resolve()) for path in images}
+            used_paths.intersection_update(current_paths)
+
+            available = [
+                path for path in images if str(path.resolve()) not in used_paths
+            ]
+            first_batch_count = min(actual_count, len(available))
+            selected = random.sample(available, first_batch_count)
+            remaining_count = actual_count - first_batch_count
+
+            if remaining_count:
+                new_cycle_pool = [path for path in images if path not in selected]
+                new_cycle_selected = random.sample(new_cycle_pool, remaining_count)
+                selected.extend(new_cycle_selected)
+                used_paths.clear()
+                used_paths.update(str(path.resolve()) for path in new_cycle_selected)
+            else:
+                used_paths.update(str(path.resolve()) for path in selected)
+                if len(used_paths) >= len(images):
+                    used_paths.clear()
+
+            shortfall_note = (
+                f"（图库总共 {len(images)} 张）" if len(selected) < count else ""
             )
+            nodes = [
+                Comp.Node(
+                    uin=event.get_self_id(),
+                    name="来只图库",
+                    content=[
+                        Comp.Plain(
+                            f"🎲 从图库「{gallery_name}」抽取了 {len(selected)} 张图片"
+                            f"{shortfall_note}"
+                        )
+                    ],
+                )
+            ]
+            nodes.extend(
+                Comp.Node(
+                    uin=event.get_self_id(),
+                    name="来只图库",
+                    content=[
+                        Comp.Plain(f"第 {index} 张"),
+                        Comp.Image.fromFileSystem(str(path.resolve())),
+                    ],
+                )
+                for index, path in enumerate(selected, start=1)
+            )
+            yield event.chain_result([Comp.Nodes(nodes)])

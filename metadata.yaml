@@ -3,7 +3,7 @@ display_name: 来只图库
 desc: 按群保存和随机抽取图片，支持从回复消息中添加图片。
 short_desc: 使用“来只”“抽”“添加”管理群聊图库。
 author: huvz04
-version: 1.1.0
+version: 1.1.1
 repo: https://github.com/huvz04/astrbot_plugin_laizhi
 astrbot_version: ">=4.26.0,<5"
 support_platforms:

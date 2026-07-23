@@ -39,6 +39,7 @@ class Main(star.Star):
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.pending_additions: dict[tuple[str, str, str], tuple[str, float]] = {}
         self.draw_history: dict[tuple[str, str, str], set[str]] = {}
+        self.gallery_md5_index: dict[tuple[str, str, str], dict[str, Path]] = {}
 
     async def _store_image(
         self,
@@ -84,7 +85,37 @@ class Main(star.Star):
 
         gallery_dir = self.data_dir / platform_id / group_id / gallery_name
         gallery_dir.mkdir(parents=True, exist_ok=True)
-        digest = hashlib.sha256(image_bytes).hexdigest()
+        gallery_key = (platform_id, group_id, gallery_name)
+        md5_index = self.gallery_md5_index.get(gallery_key)
+        if md5_index is None:
+
+            def build_md5_index() -> dict[str, Path]:
+                """Build a content hash index, including legacy SHA-named files."""
+                index: dict[str, Path] = {}
+                for existing_path in gallery_dir.iterdir():
+                    if (
+                        not existing_path.is_file()
+                        or existing_path.suffix.lower() not in IMAGE_SUFFIXES
+                    ):
+                        continue
+                    try:
+                        existing_digest = hashlib.md5(
+                            existing_path.read_bytes(),
+                            usedforsecurity=False,
+                        ).hexdigest()
+                    except OSError:
+                        continue
+                    index.setdefault(existing_digest, existing_path)
+                return index
+
+            md5_index = await asyncio.to_thread(build_md5_index)
+            self.gallery_md5_index[gallery_key] = md5_index
+
+        digest = hashlib.md5(image_bytes, usedforsecurity=False).hexdigest()
+        existing_path = md5_index.get(digest)
+        if existing_path and existing_path.is_file():
+            return existing_path, False
+
         image_path = gallery_dir / f"{digest}{suffix}"
 
         def write_exclusive() -> bool:
@@ -96,7 +127,9 @@ class Main(star.Star):
                 return False
             return True
 
-        return image_path, await asyncio.to_thread(write_exclusive)
+        is_new = await asyncio.to_thread(write_exclusive)
+        md5_index[digest] = image_path
+        return image_path, is_new
 
     def _gallery_images(
         self,
@@ -286,6 +319,7 @@ class Main(star.Star):
             image_count = len(self._gallery_images(platform_id, group_id, gallery_name))
             await asyncio.to_thread(shutil.rmtree, gallery_dir)
             self.draw_history.pop((platform_id, group_id, gallery_name), None)
+            self.gallery_md5_index.pop((platform_id, group_id, gallery_name), None)
             yield event.plain_result(
                 f"已删除“{gallery_name}”图库，共清理 {image_count} 张图片。"
             )

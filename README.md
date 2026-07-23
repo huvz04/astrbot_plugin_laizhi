@@ -1,7 +1,7 @@
 # 来只图库（AstrBot）
 
 这是基于 [huvz04/LaiZhiChatPlugin](https://github.com/huvz04/LaiZhiChatPlugin)
-交互方式重写的 AstrBot 精简版插件。图库按平台和群聊隔离，图片使用 SHA-256
+交互方式重写的 AstrBot 精简版插件。图库按平台和群聊隔离，图片使用 MD5
 去重并保存在 AstrBot 的 `data/plugin_data/astrbot_plugin_laizhi/` 下。
 
 ## 指令

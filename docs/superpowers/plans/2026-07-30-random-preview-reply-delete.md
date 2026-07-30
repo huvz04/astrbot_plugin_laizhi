@@ -432,4 +432,3 @@ Expected: tests pass; compile and JSON validation exit 0; `git diff --check` pri
 git add README.md metadata.yaml tests/test_main.py
 git commit -m "docs: describe gallery browsing and deletion"
 ```
-

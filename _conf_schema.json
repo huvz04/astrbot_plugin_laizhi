@@ -1,0 +1,8 @@
+{
+  "max_draw_count": {
+    "description": "单次最多抽取图片数",
+    "type": "int",
+    "default": 20,
+    "hint": "用于“抽 数量 图库名”，必须为正整数。"
+  }
+}

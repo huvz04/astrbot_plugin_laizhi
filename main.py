@@ -21,25 +21,36 @@ from PIL import Image as PillowImage
 PLUGIN_NAME = "astrbot_plugin_laizhi"
 IMAGE_SUFFIXES = {".gif", ".jpeg", ".jpg", ".png", ".webp"}
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
-MAX_DRAW_COUNT = 20
+DEFAULT_MAX_DRAW_COUNT = 20
 PENDING_SECONDS = 30
 
 
 class Main(star.Star):
     """Store and draw group-specific image galleries."""
 
-    def __init__(self, context: star.Context) -> None:
+    def __init__(self, context: star.Context, config=None) -> None:
         """Initialize the plugin.
 
         Args:
             context: AstrBot plugin context.
         """
-        super().__init__(context)
+        super().__init__(context, config)
+        self.config = config or {}
         self.data_dir = Path(get_astrbot_data_path()) / "plugin_data" / PLUGIN_NAME
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.pending_additions: dict[tuple[str, str, str], tuple[str, float]] = {}
         self.draw_history: dict[tuple[str, str, str], set[str]] = {}
         self.gallery_md5_index: dict[tuple[str, str, str], dict[str, Path]] = {}
+
+    def _max_draw_count(self) -> int:
+        """Return the configured positive multi-draw limit."""
+        try:
+            value = int(
+                self.config.get("max_draw_count", DEFAULT_MAX_DRAW_COUNT)
+            )
+        except (TypeError, ValueError):
+            return DEFAULT_MAX_DRAW_COUNT
+        return value if value >= 1 else DEFAULT_MAX_DRAW_COUNT
 
     async def _store_image(
         self,
@@ -346,8 +357,11 @@ class Main(star.Star):
             event.stop_event()
             count = int(draw_match.group(1))
             gallery_name = draw_match.group(2).strip()
-            if not 1 <= count <= MAX_DRAW_COUNT:
-                yield event.plain_result(f"抽取数量必须在 1 到 {MAX_DRAW_COUNT} 之间。")
+            max_draw_count = self._max_draw_count()
+            if not 1 <= count <= max_draw_count:
+                yield event.plain_result(
+                    f"抽取数量必须在 1 到 {max_draw_count} 之间。"
+                )
                 return
             if not re.fullmatch(r"[A-Za-z0-9\u4e00-\u9fff]{1,30}", gallery_name):
                 yield event.plain_result("图库名不合法。")

@@ -40,6 +40,7 @@ class Main(star.Star):
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.pending_additions: dict[tuple[str, str, str], tuple[str, float]] = {}
         self.draw_history: dict[tuple[str, str, str], set[str]] = {}
+        self.random_gallery_history: dict[tuple[str, str], set[str]] = {}
         self.gallery_md5_index: dict[tuple[str, str, str], dict[str, Path]] = {}
 
     def _max_draw_count(self) -> int:
@@ -189,6 +190,41 @@ class Main(star.Star):
             if images:
                 galleries.append((gallery_dir.name, images))
         return galleries
+
+    def _random_gallery_image(
+        self,
+        platform_id: str,
+        group_id: str,
+    ) -> tuple[str, Path] | None:
+        """Draw every group image at equal weight without repeats per cycle."""
+        entries = [
+            (gallery_name, path)
+            for gallery_name, images in self._non_empty_galleries(
+                platform_id,
+                group_id,
+            )
+            for path in images
+        ]
+        if not entries:
+            self.random_gallery_history.pop((platform_id, group_id), None)
+            return None
+
+        history_key = (platform_id, group_id)
+        used_paths = self.random_gallery_history.setdefault(history_key, set())
+        current_paths = {str(path.resolve()) for _, path in entries}
+        used_paths.intersection_update(current_paths)
+        available = [
+            (gallery_name, path)
+            for gallery_name, path in entries
+            if str(path.resolve()) not in used_paths
+        ]
+        if not available:
+            used_paths.clear()
+            available = entries
+
+        selected = random.choice(available)
+        used_paths.add(str(selected[1].resolve()))
+        return selected
 
     async def _delete_quoted_image(
         self,
@@ -367,13 +403,12 @@ class Main(star.Star):
 
         if text in {"随机来点", "随机来只"}:
             event.stop_event()
-            galleries = self._non_empty_galleries(platform_id, group_id)
-            if not galleries:
+            selected = self._random_gallery_image(platform_id, group_id)
+            if selected is None:
                 yield event.plain_result("当前群还没有可用的图库图片。")
                 return
 
-            gallery_name, images = random.choice(galleries)
-            image_path = random.choice(images)
+            gallery_name, image_path = selected
             yield event.chain_result(
                 [
                     Comp.Image.fromFileSystem(str(image_path.resolve())),
@@ -402,7 +437,7 @@ class Main(star.Star):
             event.stop_event()
             if not event.is_admin():
                 yield event.plain_result(
-                    "只有 AstrBot 管理员可以删除图库图片。"
+                    "只有管理员可以删除图库图片。"
                 )
                 return
 
@@ -449,7 +484,7 @@ class Main(star.Star):
         if clean_match:
             event.stop_event()
             if not event.is_admin():
-                yield event.plain_result("只有 AstrBot 管理员可以删除图库。")
+                yield event.plain_result("只有管理员可以删除图库。")
                 return
 
             gallery_name = clean_match.group(1).strip()

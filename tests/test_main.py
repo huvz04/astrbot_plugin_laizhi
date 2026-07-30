@@ -7,6 +7,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from PIL import Image as PillowImage
 
@@ -260,6 +261,25 @@ class BrowseTests(unittest.TestCase):
                     {"🎲 随机来自图库「猫猫」", "🎲 随机来自图库「狗狗」"},
                 )
 
+    def test_random_commands_do_not_repeat_until_all_images_are_used(self) -> None:
+        write_png(self.group_dir / "猫猫" / "one.png", "red")
+        write_png(self.group_dir / "狗狗" / "one.png", "blue")
+        write_png(self.group_dir / "狗狗" / "two.png", "green")
+
+        selected_paths: list[str] = []
+        with patch.object(plugin_main.random, "choice", side_effect=lambda items: items[0]):
+            for _ in range(3):
+                result = run_handler(self.plugin, FakeEvent("随机来点"))[0]
+                selected_paths.append(
+                    next(
+                        item.file
+                        for item in result.chain
+                        if isinstance(item, FakeImage)
+                    )
+                )
+
+        self.assertEqual(len(set(selected_paths)), 3)
+
     def test_random_commands_require_full_match(self) -> None:
         write_png(self.group_dir / "猫猫" / "one.png", "red")
         for text in ("帮我随机来点", "随机来只猫猫"):
@@ -336,7 +356,8 @@ class DeleteTests(unittest.TestCase):
 
         result = run_handler(self.plugin, event)[0]
 
-        self.assertEqual(result.text, "只有 AstrBot 管理员可以删除图库图片。")
+        self.assertEqual(result.text, "只有管理员可以删除图库图片。")
+        self.assertNotIn("AstrBot", result.text)
         self.assertTrue(image_path.exists())
 
     def test_delete_without_reply_does_not_remove_gallery(self) -> None:
@@ -388,6 +409,12 @@ class DeleteTests(unittest.TestCase):
         self.assertIn("已删除“猫猫”图库", result.text)
         self.assertFalse(image_path.parent.exists())
 
+    def test_non_admin_clean_message_uses_generic_admin_wording(self) -> None:
+        self.add_same_image("猫猫")
+        result = run_handler(self.plugin, FakeEvent("#清理 猫猫"))[0]
+        self.assertEqual(result.text, "只有管理员可以删除图库。")
+        self.assertNotIn("AstrBot", result.text)
+
 
 class DocumentationTests(unittest.TestCase):
     def test_readme_documents_current_command_contract(self) -> None:
@@ -396,6 +423,8 @@ class DocumentationTests(unittest.TestCase):
         self.assertIn("`预览全部`", readme)
         self.assertIn("回复图片并发送 `删除 图库名`", readme)
         self.assertIn("`#清理 图库名`", readme)
+        self.assertIn("一轮内不会重复", readme)
+        self.assertNotIn("仅 AstrBot 管理员可用", readme)
         self.assertNotIn("`删除 猫猫` 或 `#清理 猫猫`", readme)
 
 

@@ -10,6 +10,8 @@ from pathlib import Path
 
 from PIL import Image as PillowImage
 
+MEDIA_BYTES: dict[str, bytes | Exception] = {}
+
 
 class FakePlain:
     def __init__(self, text: str) -> None:
@@ -49,6 +51,18 @@ class FakeResult:
         self.chain = chain or []
         self.image = image
 
+
+class FakeMediaResolver:
+    def __init__(self, source: str, *, media_type: str) -> None:
+        self.source = source
+        self.media_type = media_type
+
+    async def to_bytes(self) -> bytes:
+        value = MEDIA_BYTES[self.source]
+        if isinstance(value, Exception):
+            raise value
+        return value
+
 class FakeStar:
     def __init__(self, context: object, config: dict | None = None) -> None:
         self.context = context
@@ -85,10 +99,10 @@ def install_astrbot_stubs() -> None:
     components.Node = FakeNode
     components.Nodes = FakeNodes
     astrbot_path.get_astrbot_data_path = lambda: tempfile.gettempdir()
-    media_utils.MediaResolver = type("MediaResolver", (), {})
+    media_utils.MediaResolver = FakeMediaResolver
 
     async def extract_quoted_message_images(event: object) -> list[str]:
-        return []
+        return list(getattr(event, "quoted_images", []))
 
     quoted_message.extract_quoted_message_images = extract_quoted_message_images
     sys.modules.update(
@@ -116,6 +130,7 @@ class FakeEvent:
         self._messages = [FakePlain(text)]
         self._admin = admin
         self.stopped = False
+        self.quoted_images: list[str] = []
 
     def get_messages(self) -> list[object]:
         return self._messages
@@ -158,6 +173,16 @@ def run_handler(plugin: object, event: FakeEvent) -> list[FakeResult]:
 def write_png(path: Path, color: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     PillowImage.new("RGB", (2, 2), color=color).save(path)
+
+
+def png_bytes(color: str) -> bytes:
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as image_file:
+        path = Path(image_file.name)
+    try:
+        write_png(path, color)
+        return path.read_bytes()
+    finally:
+        path.unlink(missing_ok=True)
 
 
 class ConfigTests(unittest.TestCase):
@@ -248,6 +273,105 @@ class BrowseTests(unittest.TestCase):
         write_png(self.group_dir / "猫猫" / "one.png", "red")
         result = run_handler(self.plugin, FakeEvent("来点猫猫"))[0]
         self.assertEqual(result.kind, "image")
+
+
+class DeleteTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.original_data_path = plugin_main.get_astrbot_data_path
+        plugin_main.get_astrbot_data_path = lambda: self.temp_dir.name
+        self.plugin = plugin_main.Main(object(), {})
+        self.group_dir = (
+            Path(self.temp_dir.name)
+            / "plugin_data"
+            / plugin_main.PLUGIN_NAME
+            / "aiocqhttp"
+            / "100"
+        )
+        MEDIA_BYTES.clear()
+        MEDIA_BYTES["quoted"] = png_bytes("red")
+
+    def tearDown(self) -> None:
+        plugin_main.get_astrbot_data_path = self.original_data_path
+        self.temp_dir.cleanup()
+        MEDIA_BYTES.clear()
+
+    def add_same_image(self, gallery_name: str) -> Path:
+        path = self.group_dir / gallery_name / "same.png"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(MEDIA_BYTES["quoted"])
+        return path
+
+    def test_admin_reply_delete_removes_only_named_gallery(self) -> None:
+        cat_path = self.add_same_image("猫猫")
+        dog_path = self.add_same_image("狗狗")
+        event = FakeEvent("删除 猫猫", admin=True)
+        event.quoted_images = ["quoted"]
+
+        result = run_handler(self.plugin, event)[0]
+
+        self.assertEqual(result.text, "已从“猫猫”图库删除这张图片。")
+        self.assertFalse(cat_path.exists())
+        self.assertTrue(dog_path.exists())
+
+    def test_non_admin_reply_delete_changes_nothing(self) -> None:
+        image_path = self.add_same_image("猫猫")
+        event = FakeEvent("删除 猫猫")
+        event.quoted_images = ["quoted"]
+
+        result = run_handler(self.plugin, event)[0]
+
+        self.assertEqual(result.text, "只有 AstrBot 管理员可以删除图库图片。")
+        self.assertTrue(image_path.exists())
+
+    def test_delete_without_reply_does_not_remove_gallery(self) -> None:
+        image_path = self.add_same_image("猫猫")
+
+        result = run_handler(
+            self.plugin,
+            FakeEvent("删除 猫猫", admin=True),
+        )[0]
+
+        self.assertEqual(
+            result.text,
+            "请回复一张图库图片并发送“删除 图库名”。",
+        )
+        self.assertTrue(image_path.exists())
+
+    def test_reply_image_must_exist_in_named_gallery(self) -> None:
+        image_path = self.group_dir / "猫猫" / "blue.png"
+        write_png(image_path, "blue")
+        event = FakeEvent("删除 猫猫", admin=True)
+        event.quoted_images = ["quoted"]
+
+        result = run_handler(self.plugin, event)[0]
+
+        self.assertEqual(result.text, "“猫猫”图库中没有找到这张图片。")
+        self.assertTrue(image_path.exists())
+
+    def test_delete_rejects_invalid_gallery_name(self) -> None:
+        event = FakeEvent("删除 ../猫猫", admin=True)
+        event.quoted_images = ["quoted"]
+        result = run_handler(self.plugin, event)[0]
+        self.assertEqual(result.text, "图库名不合法。")
+
+    def test_delete_reports_quoted_image_read_failure(self) -> None:
+        MEDIA_BYTES["broken"] = RuntimeError("download failed")
+        event = FakeEvent("删除 猫猫", admin=True)
+        event.quoted_images = ["broken"]
+        result = run_handler(self.plugin, event)[0]
+        self.assertEqual(result.text, "读取被回复的图片失败，请稍后再试。")
+
+    def test_clean_hash_command_still_removes_whole_gallery(self) -> None:
+        image_path = self.add_same_image("猫猫")
+
+        result = run_handler(
+            self.plugin,
+            FakeEvent("#清理 猫猫", admin=True),
+        )[0]
+
+        self.assertIn("已删除“猫猫”图库", result.text)
+        self.assertFalse(image_path.parent.exists())
 
 
 if __name__ == "__main__":

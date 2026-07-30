@@ -190,6 +190,38 @@ class Main(star.Star):
                 galleries.append((gallery_dir.name, images))
         return galleries
 
+    async def _delete_quoted_image(
+        self,
+        source: str,
+        platform_id: str,
+        group_id: str,
+        gallery_name: str,
+    ) -> Path | None:
+        """Delete the quoted image only from the explicitly named gallery."""
+        image_bytes = await MediaResolver(source, media_type="image").to_bytes()
+        digest = hashlib.md5(
+            image_bytes,
+            usedforsecurity=False,
+        ).hexdigest()
+        gallery_key = (platform_id, group_id, gallery_name)
+        images = self._gallery_images(platform_id, group_id, gallery_name)
+        for path in images:
+            try:
+                existing_bytes = await asyncio.to_thread(path.read_bytes)
+            except OSError:
+                continue
+            existing_digest = hashlib.md5(
+                existing_bytes,
+                usedforsecurity=False,
+            ).hexdigest()
+            if existing_digest != digest:
+                continue
+            await asyncio.to_thread(path.unlink)
+            self.gallery_md5_index.pop(gallery_key, None)
+            self.draw_history.pop(gallery_key, None)
+            return path
+        return None
+
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=10)
     async def on_group_message(self, event: AstrMessageEvent):
         """Handle gallery commands and pending image additions.
@@ -365,14 +397,62 @@ class Main(star.Star):
             yield event.plain_result("\n".join(lines))
             return
 
-        delete_match = re.fullmatch(r"(?:删除|#清理)\s*(.+)", text)
-        if delete_match:
+        delete_image_match = re.fullmatch(r"删除\s*(.+)", text)
+        if delete_image_match:
+            event.stop_event()
+            if not event.is_admin():
+                yield event.plain_result(
+                    "只有 AstrBot 管理员可以删除图库图片。"
+                )
+                return
+
+            gallery_name = delete_image_match.group(1).strip()
+            if not re.fullmatch(r"[A-Za-z0-9\u4e00-\u9fff]{1,30}", gallery_name):
+                yield event.plain_result("图库名不合法。")
+                return
+
+            try:
+                quoted_images = await extract_quoted_message_images(event)
+            except Exception:
+                logger.exception("Failed to resolve the replied image for deletion")
+                yield event.plain_result("读取被回复的图片失败，请稍后再试。")
+                return
+            if not quoted_images:
+                yield event.plain_result(
+                    "请回复一张图库图片并发送“删除 图库名”。"
+                )
+                return
+
+            try:
+                deleted_path = await self._delete_quoted_image(
+                    quoted_images[0],
+                    platform_id,
+                    group_id,
+                    gallery_name,
+                )
+            except Exception:
+                logger.exception("Failed to delete the replied gallery image")
+                yield event.plain_result("读取被回复的图片失败，请稍后再试。")
+                return
+            if deleted_path is None:
+                yield event.plain_result(
+                    f"“{gallery_name}”图库中没有找到这张图片。"
+                )
+                return
+
+            yield event.plain_result(
+                f"已从“{gallery_name}”图库删除这张图片。"
+            )
+            return
+
+        clean_match = re.fullmatch(r"#清理\s*(.+)", text)
+        if clean_match:
             event.stop_event()
             if not event.is_admin():
                 yield event.plain_result("只有 AstrBot 管理员可以删除图库。")
                 return
 
-            gallery_name = delete_match.group(1).strip()
+            gallery_name = clean_match.group(1).strip()
             if not re.fullmatch(r"[A-Za-z0-9\u4e00-\u9fff]{1,30}", gallery_name):
                 yield event.plain_result("图库名不合法。")
                 return

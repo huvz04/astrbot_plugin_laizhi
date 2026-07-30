@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import importlib
 import asyncio
+import importlib
 import sys
 import tempfile
 import types
@@ -203,6 +203,20 @@ class ConfigTests(unittest.TestCase):
                     with self.subTest(config=config):
                         plugin = plugin_main.Main(object(), config)
                         self.assertEqual(plugin._max_draw_count(), expected)
+            finally:
+                plugin_main.get_astrbot_data_path = original
+
+    def test_draw_command_uses_configured_limit_in_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            original = plugin_main.get_astrbot_data_path
+            plugin_main.get_astrbot_data_path = lambda: directory
+            try:
+                plugin = plugin_main.Main(object(), {"max_draw_count": 8})
+                result = run_handler(plugin, FakeEvent("抽 9 猫猫"))[0]
+                self.assertEqual(
+                    result.text,
+                    "抽取数量必须在 1 到 8 之间。",
+                )
             finally:
                 plugin_main.get_astrbot_data_path = original
 

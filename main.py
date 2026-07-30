@@ -167,6 +167,29 @@ class Main(star.Star):
             if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES
         ]
 
+    def _non_empty_galleries(
+        self,
+        platform_id: str,
+        group_id: str,
+    ) -> list[tuple[str, list[Path]]]:
+        """List non-empty galleries for one platform group in name order."""
+        group_dir = self.data_dir / platform_id / group_id
+        if not group_dir.is_dir():
+            return []
+
+        galleries: list[tuple[str, list[Path]]] = []
+        for gallery_dir in sorted(group_dir.iterdir(), key=lambda path: path.name):
+            if not gallery_dir.is_dir():
+                continue
+            images = self._gallery_images(
+                platform_id,
+                group_id,
+                gallery_dir.name,
+            )
+            if images:
+                galleries.append((gallery_dir.name, images))
+        return galleries
+
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=10)
     async def on_group_message(self, event: AstrMessageEvent):
         """Handle gallery commands and pending image additions.
@@ -308,6 +331,38 @@ class Main(star.Star):
                 self.pending_additions.pop(pending_key, None)
 
             yield result
+            return
+
+        if text in {"随机来点", "随机来只"}:
+            event.stop_event()
+            galleries = self._non_empty_galleries(platform_id, group_id)
+            if not galleries:
+                yield event.plain_result("当前群还没有可用的图库图片。")
+                return
+
+            gallery_name, images = random.choice(galleries)
+            image_path = random.choice(images)
+            yield event.chain_result(
+                [
+                    Comp.Image.fromFileSystem(str(image_path.resolve())),
+                    Comp.Plain(f"🎲 随机来自图库「{gallery_name}」"),
+                ]
+            )
+            return
+
+        if text == "预览全部":
+            event.stop_event()
+            galleries = self._non_empty_galleries(platform_id, group_id)
+            if not galleries:
+                yield event.plain_result("当前群还没有可用的图库。")
+                return
+
+            lines = ["当前群图库："]
+            lines.extend(
+                f"{gallery_name}：{len(images)} 张"
+                for gallery_name, images in galleries
+            )
+            yield event.plain_result("\n".join(lines))
             return
 
         delete_match = re.fullmatch(r"(?:删除|#清理)\s*(.+)", text)

@@ -122,6 +122,7 @@ def install_astrbot_stubs() -> None:
 
 install_astrbot_stubs()
 plugin_main = importlib.import_module("main")
+PROJECT_ROOT = Path(__file__).parents[1]
 
 
 class FakeEvent:
@@ -372,6 +373,16 @@ class DeleteTests(unittest.TestCase):
 
         self.assertIn("已删除“猫猫”图库", result.text)
         self.assertFalse(image_path.parent.exists())
+
+
+class DocumentationTests(unittest.TestCase):
+    def test_readme_documents_current_command_contract(self) -> None:
+        readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("`随机来点`、`随机来只`", readme)
+        self.assertIn("`预览全部`", readme)
+        self.assertIn("回复图片并发送 `删除 图库名`", readme)
+        self.assertIn("`#清理 图库名`", readme)
+        self.assertNotIn("`删除 猫猫` 或 `#清理 猫猫`", readme)
 
 
 if __name__ == "__main__":

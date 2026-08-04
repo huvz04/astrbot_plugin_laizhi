@@ -1,9 +1,9 @@
 name: astrbot_plugin_laizhi
 display_name: 来只图库
-desc: 按群保存和随机抽取图片，支持从回复消息中添加图片。
-short_desc: 随机浏览群聊图库，并支持管理员回复删除图片。
+desc: 按群保存和随机抽取图片，支持统计总览和管理员回复删除。
+short_desc: 随机浏览群聊图库并生成贡献、规模和热门排行。
 author: huvz04
-version: 1.2.0
+version: 1.3.0
 repo: https://github.com/huvz04/astrbot_plugin_laizhi
 astrbot_version: ">=4.26.0,<5"
 support_platforms:

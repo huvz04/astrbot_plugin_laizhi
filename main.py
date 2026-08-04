@@ -18,6 +18,8 @@ from astrbot.core.utils.media_utils import MediaResolver
 from astrbot.core.utils.quoted_message import extract_quoted_message_images
 from PIL import Image as PillowImage
 
+from stats_store import GalleryStatsStore
+
 PLUGIN_NAME = "astrbot_plugin_laizhi"
 IMAGE_SUFFIXES = {".gif", ".jpeg", ".jpg", ".png", ".webp"}
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
@@ -42,6 +44,13 @@ class Main(star.Star):
         self.draw_history: dict[tuple[str, str, str], set[str]] = {}
         self.random_gallery_history: dict[tuple[str, str], set[str]] = {}
         self.gallery_md5_index: dict[tuple[str, str, str], dict[str, Path]] = {}
+        try:
+            self.stats_store: GalleryStatsStore | None = GalleryStatsStore(
+                self.data_dir / "gallery_stats.db"
+            )
+        except Exception:
+            logger.exception("Failed to initialize gallery statistics")
+            self.stats_store = None
 
     def _max_draw_count(self) -> int:
         """Return the configured positive multi-draw limit."""
@@ -52,6 +61,36 @@ class Main(star.Star):
         except (TypeError, ValueError):
             return DEFAULT_MAX_DRAW_COUNT
         return value if value >= 1 else DEFAULT_MAX_DRAW_COUNT
+
+    def _config_int(
+        self,
+        key: str,
+        default: int,
+        minimum: int,
+        maximum: int,
+    ) -> int:
+        try:
+            value = int(self.config.get(key, default))
+        except (TypeError, ValueError):
+            value = default
+        return min(max(value, minimum), maximum)
+
+    async def _record_stat(self, event_type: str, **values) -> None:
+        if self.stats_store is None:
+            return
+        try:
+            await asyncio.to_thread(self.stats_store.record, event_type, **values)
+        except Exception:
+            logger.exception("Failed to persist gallery statistics")
+
+    @staticmethod
+    def _sender_identity(event: AstrMessageEvent) -> tuple[str, str]:
+        sender_id = str(event.get_sender_id())
+        try:
+            sender_name = str(event.get_sender_name() or "").strip()
+        except Exception:
+            sender_name = ""
+        return sender_id, sender_name or sender_id
 
     async def _store_image(
         self,
@@ -190,6 +229,93 @@ class Main(star.Star):
             if images:
                 galleries.append((gallery_dir.name, images))
         return galleries
+
+    async def _overview_data(self, platform_id: str, group_id: str) -> dict:
+        recent_days = self._config_int("overview_recent_days", 7, 1, 365)
+        top_users = self._config_int("overview_top_users", 10, 1, 50)
+        max_galleries = self._config_int("overview_max_galleries", 50, 1, 200)
+        galleries = sorted(
+            (
+                {"name": name, "count": len(images)}
+                for name, images in self._non_empty_galleries(platform_id, group_id)
+            ),
+            key=lambda item: (-item["count"], item["name"]),
+        )
+        try:
+            if self.stats_store is None:
+                raise RuntimeError("gallery statistics are unavailable")
+            stats = await asyncio.to_thread(
+                self.stats_store.overview,
+                platform_id,
+                group_id,
+                recent_days=recent_days,
+                top_users=top_users,
+            )
+        except Exception:
+            logger.exception("Failed to load gallery statistics")
+            stats = {
+                "contributors": [],
+                "popular": [],
+                "additions": 0,
+                "recent_calls": 0,
+            }
+        stats["popular"] = stats["popular"][:max_galleries]
+        return {
+            **stats,
+            "recent_days": recent_days,
+            "gallery_count": len(galleries),
+            "image_count": sum(item["count"] for item in galleries),
+            "galleries": galleries[:max_galleries],
+        }
+
+    @staticmethod
+    def _overview_text(data: dict) -> str:
+        lines = [
+            "本群图库总览",
+            (
+                f"图库：{data['gallery_count']} 个｜图片：{data['image_count']} 张｜"
+                f"近 {data['recent_days']} 天调用：{data['recent_calls']} 次"
+            ),
+            "",
+            "添加贡献榜",
+        ]
+        contributors = data["contributors"]
+        lines.extend(
+            f"{index}. {item['name']}  {item['count']} 张"
+            for index, item in enumerate(contributors, start=1)
+        )
+        if not contributors:
+            lines.append("暂无记录")
+        lines.extend(["", "图库规模榜"])
+        lines.extend(
+            f"{index}. {item['name']}  {item['count']} 张"
+            for index, item in enumerate(data["galleries"], start=1)
+        )
+        lines.extend(["", f"近 {data['recent_days']} 天热门榜"])
+        popular = data["popular"]
+        lines.extend(
+            f"{index}. {item['gallery_name']}  {item['count']} 次"
+            for index, item in enumerate(popular, start=1)
+        )
+        if not popular:
+            lines.append("暂无记录")
+        lines.extend(["", "贡献与调用数据自统计功能启用后开始记录。"])
+        return "\n".join(lines)
+
+    async def _render_overview(self, data: dict) -> str:
+        template_path = Path(__file__).parent / "templates" / "overview.html"
+        template = await asyncio.to_thread(template_path.read_text, encoding="utf-8")
+        width = self._config_int("overview_render_width", 1200, 800, 1800)
+        return await self.html_render(
+            template,
+            data,
+            return_url=False,
+            options={
+                "viewport": {"width": width, "height": 900},
+                "type": "png",
+                "full_page": True,
+            },
+        )
 
     def _random_gallery_image(
         self,
@@ -339,6 +465,16 @@ class Main(star.Star):
                     if is_new:
                         saved_count += 1
                         saved_paths.append(image_path)
+                        added_by_id, added_by_name = self._sender_identity(event)
+                        await self._record_stat(
+                            "IMAGE_ADDED",
+                            platform_id=platform_id,
+                            group_id=group_id,
+                            gallery_name=gallery_name,
+                            image_md5=image_path.stem,
+                            user_id=added_by_id,
+                            user_name=added_by_name,
+                        )
                     else:
                         duplicate_count += 1
             except Exception as exc:
@@ -383,6 +519,16 @@ class Main(star.Star):
                     gallery_name,
                 )
                 if is_new:
+                    added_by_id, added_by_name = self._sender_identity(event)
+                    await self._record_stat(
+                        "IMAGE_ADDED",
+                        platform_id=platform_id,
+                        group_id=group_id,
+                        gallery_name=gallery_name,
+                        image_md5=image_path.stem,
+                        user_id=added_by_id,
+                        user_name=added_by_name,
+                    )
                     result = event.chain_result(
                         [
                             Comp.Image.fromFileSystem(str(image_path.resolve())),
@@ -409,6 +555,15 @@ class Main(star.Star):
                 return
 
             gallery_name, image_path = selected
+            await self._record_stat(
+                "GALLERY_CALLED",
+                platform_id=platform_id,
+                group_id=group_id,
+                gallery_name=gallery_name,
+                user_id=sender_id,
+                user_name=self._sender_identity(event)[1],
+                command_type=text,
+            )
             yield event.chain_result(
                 [
                     Comp.Image.fromFileSystem(str(image_path.resolve())),
@@ -417,19 +572,17 @@ class Main(star.Star):
             )
             return
 
-        if text == "预览全部":
+        if text in {"预览全部", "图库统计"}:
             event.stop_event()
-            galleries = self._non_empty_galleries(platform_id, group_id)
-            if not galleries:
-                yield event.plain_result("当前群还没有可用的图库。")
-                return
-
-            lines = ["当前群图库："]
-            lines.extend(
-                f"{gallery_name}：{len(images)} 张"
-                for gallery_name, images in galleries
-            )
-            yield event.plain_result("\n".join(lines))
+            overview_data = await self._overview_data(platform_id, group_id)
+            try:
+                overview_path = await self._render_overview(overview_data)
+                if not overview_path:
+                    raise ValueError("html_render returned an empty path")
+                yield event.image_result(str(overview_path))
+            except Exception:
+                logger.exception("Failed to render gallery overview")
+                yield event.plain_result(self._overview_text(overview_data))
             return
 
         delete_image_match = re.fullmatch(r"删除\s*(.+)", text)
@@ -475,6 +628,16 @@ class Main(star.Star):
                 )
                 return
 
+            deleted_by_id, deleted_by_name = self._sender_identity(event)
+            await self._record_stat(
+                "IMAGE_DELETED",
+                platform_id=platform_id,
+                group_id=group_id,
+                gallery_name=gallery_name,
+                image_md5=deleted_path.stem,
+                user_id=deleted_by_id,
+                user_name=deleted_by_name,
+            )
             yield event.plain_result(
                 f"已从“{gallery_name}”图库删除这张图片。"
             )
@@ -519,6 +682,15 @@ class Main(star.Star):
                 yield event.plain_result(f"“{gallery_name}”图库里还没有图片。")
                 return
 
+            await self._record_stat(
+                "GALLERY_CALLED",
+                platform_id=platform_id,
+                group_id=group_id,
+                gallery_name=gallery_name,
+                user_id=sender_id,
+                user_name=self._sender_identity(event)[1],
+                command_type=get_match.group(0),
+            )
             yield event.image_result(str(random.choice(images).resolve()))
             return
 
@@ -591,5 +763,15 @@ class Main(star.Star):
                     ],
                 )
                 for index, path in enumerate(selected, start=1)
+            )
+            await self._record_stat(
+                "GALLERY_CALLED",
+                platform_id=platform_id,
+                group_id=group_id,
+                gallery_name=gallery_name,
+                user_id=sender_id,
+                user_name=self._sender_identity(event)[1],
+                command_type="抽",
+                image_count=len(selected),
             )
             yield event.chain_result([Comp.Nodes(nodes)])

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import importlib
 import sys
 import tempfile
@@ -20,12 +21,16 @@ class FakePlain:
 
 
 class FakeImage:
-    def __init__(self, file: str = "") -> None:
+    def __init__(self, file: str = "", data: bytes | None = None) -> None:
         self.file = file
+        self.data = data
 
     @classmethod
     def fromFileSystem(cls, file: str):
         return cls(file)
+
+    async def convert_to_base64(self) -> str:
+        return base64.b64encode(self.data or b"").decode("ascii")
 
 
 class FakeNode:
@@ -68,6 +73,17 @@ class FakeStar:
     def __init__(self, context: object, config: dict | None = None) -> None:
         self.context = context
         self.config = config or {}
+        self.last_render: tuple[str, dict, dict | None] | None = None
+
+    async def html_render(
+        self,
+        template: str,
+        data: dict,
+        return_url: bool = False,
+        options: dict | None = None,
+    ) -> str:
+        self.last_render = (template, data, options)
+        return "overview.png"
 
 
 def passthrough_decorator(*args: object, **kwargs: object):
@@ -145,6 +161,9 @@ class FakeEvent:
 
     def get_sender_id(self) -> str:
         return "200"
+
+    def get_sender_name(self) -> str:
+        return "测试用户"
 
     def get_self_id(self) -> str:
         return "300"
@@ -286,7 +305,7 @@ class BrowseTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(run_handler(self.plugin, FakeEvent(text)), [])
 
-    def test_preview_all_lists_sorted_non_empty_galleries(self) -> None:
+    def test_preview_all_renders_sorted_gallery_overview(self) -> None:
         write_png(self.group_dir / "猫猫" / "one.png", "red")
         write_png(self.group_dir / "猫猫" / "two.png", "green")
         write_png(self.group_dir / "狗狗" / "one.png", "blue")
@@ -294,20 +313,49 @@ class BrowseTests(unittest.TestCase):
 
         result = run_handler(self.plugin, FakeEvent("预览全部"))[0]
 
-        self.assertEqual(result.kind, "plain")
+        self.assertEqual(result.kind, "image")
+        self.assertEqual(result.image, "overview.png")
+        self.assertIsNotNone(self.plugin.last_render)
+        data = self.plugin.last_render[1]
         self.assertEqual(
-            result.text,
-            "当前群图库：\n狗狗：1 张\n猫猫：2 张",
+            data["galleries"],
+            [{"name": "猫猫", "count": 2}, {"name": "狗狗", "count": 1}],
         )
 
-    def test_preview_all_reports_empty_state(self) -> None:
-        result = run_handler(self.plugin, FakeEvent("预览全部"))[0]
-        self.assertEqual(result.text, "当前群还没有可用的图库。")
+    def test_overview_render_failure_falls_back_to_text(self) -> None:
+        write_png(self.group_dir / "猫猫" / "one.png", "red")
+
+        async def fail_render(*args: object, **kwargs: object) -> str:
+            raise RuntimeError("renderer unavailable")
+
+        self.plugin.html_render = fail_render
+        result = run_handler(self.plugin, FakeEvent("图库统计"))[0]
+        self.assertEqual(result.kind, "plain")
+        self.assertIn("本群图库总览", result.text)
+        self.assertIn("猫猫  1 张", result.text)
 
     def test_ordinary_get_remains_image_only(self) -> None:
         write_png(self.group_dir / "猫猫" / "one.png", "red")
         result = run_handler(self.plugin, FakeEvent("来点猫猫"))[0]
         self.assertEqual(result.kind, "image")
+        stats = self.plugin.stats_store.overview(
+            "aiocqhttp", "100", recent_days=7, top_users=10
+        )
+        self.assertEqual(stats["recent_calls"], 1)
+        self.assertEqual(stats["popular"][0]["gallery_name"], "猫猫")
+
+    def test_duplicate_addition_counts_only_the_successful_new_image(self) -> None:
+        payload = png_bytes("red")
+        for _ in range(2):
+            event = FakeEvent("添加 猫猫")
+            event._messages.append(FakeImage(data=payload))
+            run_handler(self.plugin, event)
+
+        stats = self.plugin.stats_store.overview(
+            "aiocqhttp", "100", recent_days=7, top_users=10
+        )
+        self.assertEqual(stats["additions"], 1)
+        self.assertEqual(stats["contributors"][0]["name"], "测试用户")
 
 
 class DeleteTests(unittest.TestCase):

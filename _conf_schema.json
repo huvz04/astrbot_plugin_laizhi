@@ -4,5 +4,29 @@
     "type": "int",
     "default": 20,
     "hint": "用于“抽 数量 图库名”，必须为正整数。"
+  },
+  "overview_recent_days": {
+    "description": "热门图库统计天数",
+    "type": "int",
+    "default": 7,
+    "hint": "总览中“最近热门榜”的时间窗口，范围 1-365 天。"
+  },
+  "overview_top_users": {
+    "description": "贡献榜显示人数",
+    "type": "int",
+    "default": 10,
+    "hint": "范围 1-50。"
+  },
+  "overview_max_galleries": {
+    "description": "总览最多显示图库数",
+    "type": "int",
+    "default": 50,
+    "hint": "范围 1-200，避免生成过长图片。"
+  },
+  "overview_render_width": {
+    "description": "总览图片渲染宽度",
+    "type": "int",
+    "default": 1200,
+    "hint": "范围 800-1800 像素。"
   }
 }

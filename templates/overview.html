@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+* { box-sizing: border-box; }
+body { margin: 0; padding: 42px; background: #f4f1ea; color: #27241f; font-family: "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; }
+.sheet { width: 100%; max-width: 1116px; margin: 0 auto; background: #fffdf8; border: 1px solid #ded8cc; border-radius: 24px; padding: 38px; }
+.eyebrow { color: #8d7558; font-size: 18px; letter-spacing: 4px; }
+h1 { margin: 8px 0 30px; font-size: 46px; }
+.metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 30px; }
+.metric { padding: 20px; border-radius: 16px; background: #eee8dc; }
+.metric b { display: block; font-size: 34px; margin-top: 8px; }
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; align-items: start; }
+.panel { border: 1px solid #e5ded2; border-radius: 18px; padding: 22px; }
+.panel.wide { grid-column: 1 / -1; }
+h2 { margin: 0 0 15px; font-size: 25px; }
+.row { display: grid; grid-template-columns: 42px 1fr auto; gap: 10px; padding: 11px 0; border-top: 1px solid #eee9df; align-items: center; }
+.row:first-of-type { border-top: 0; }
+.rank { color: #9b8060; font-weight: 700; }
+.value { font-weight: 700; }
+.empty { color: #948f86; padding: 16px 0; }
+.note { margin-top: 24px; color: #8b857c; font-size: 15px; }
+</style>
+</head>
+<body>
+<main class="sheet">
+  <div class="eyebrow">LAIZHI GALLERY</div>
+  <h1>本群图库总览</h1>
+  <section class="metrics">
+    <div class="metric">图库数量<b>{{ gallery_count }}</b></div>
+    <div class="metric">图片总数<b>{{ image_count }}</b></div>
+    <div class="metric">成功添加<b>{{ additions }}</b></div>
+    <div class="metric">近 {{ recent_days }} 天调用<b>{{ recent_calls }}</b></div>
+  </section>
+  <section class="grid">
+    <div class="panel">
+      <h2>添加贡献榜</h2>
+      {% for item in contributors %}
+      <div class="row"><span class="rank">{{ loop.index }}</span><span>{{ item.name | e }}</span><span class="value">{{ item.count }} 张</span></div>
+      {% else %}<div class="empty">统计启用后还没有新增图片</div>{% endfor %}
+    </div>
+    <div class="panel">
+      <h2>近 {{ recent_days }} 天热门图库</h2>
+      {% for item in popular %}
+      <div class="row"><span class="rank">{{ loop.index }}</span><span>{{ item.gallery_name | e }}</span><span class="value">{{ item.count }} 次</span></div>
+      {% else %}<div class="empty">最近还没有图库调用记录</div>{% endfor %}
+    </div>
+    <div class="panel wide">
+      <h2>图库规模</h2>
+      {% for item in galleries %}
+      <div class="row"><span class="rank">{{ loop.index }}</span><span>{{ item.name | e }}</span><span class="value">{{ item.count }} 张</span></div>
+      {% else %}<div class="empty">当前群还没有可用图库</div>{% endfor %}
+    </div>
+  </section>
+  <div class="note">贡献与调用数据自统计功能启用后开始记录；历史图片仅计入当前库存。</div>
+</main>
+</body>
+</html>

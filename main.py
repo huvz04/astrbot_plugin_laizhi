@@ -18,7 +18,11 @@ from astrbot.core.utils.media_utils import MediaResolver
 from astrbot.core.utils.quoted_message import extract_quoted_message_images
 from PIL import Image as PillowImage
 
-from stats_store import GalleryStatsStore
+try:
+    # AstrBot loads plugins as packages, so sibling modules need a relative import.
+    from .stats_store import GalleryStatsStore
+except ImportError:  # pragma: no cover - supports direct local test execution
+    from stats_store import GalleryStatsStore
 
 PLUGIN_NAME = "astrbot_plugin_laizhi"
 IMAGE_SUFFIXES = {".gif", ".jpeg", ".jpg", ".png", ".webp"}

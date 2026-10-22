@@ -4,6 +4,7 @@ import asyncio
 import base64
 import hashlib
 import io
+import math
 import random
 import re
 import shutil
@@ -46,7 +47,7 @@ class Main(star.Star):
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.pending_additions: dict[tuple[str, str, str], tuple[str, float]] = {}
         self.draw_history: dict[tuple[str, str, str], set[str]] = {}
-        self.random_gallery_history: dict[tuple[str, str], set[str]] = {}
+        self.random_gallery_history: dict[tuple[str, str, str], set[str]] = {}
         self.gallery_md5_index: dict[tuple[str, str, str], dict[str, Path]] = {}
         try:
             self.stats_store: GalleryStatsStore | None = GalleryStatsStore(
@@ -234,6 +235,19 @@ class Main(star.Star):
                 galleries.append((gallery_dir.name, images))
         return galleries
 
+    def _gallery_weight(
+        self,
+        platform_id: str,
+        group_id: str,
+        gallery_name: str,
+    ) -> float:
+        weight_path = self.data_dir / platform_id / group_id / gallery_name / ".weight"
+        try:
+            weight = float(weight_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return 1.0
+        return weight if math.isfinite(weight) and weight >= 0 else 1.0
+
     async def _overview_data(self, platform_id: str, group_id: str) -> dict:
         recent_days = self._config_int("overview_recent_days", 7, 1, 365)
         top_users = self._config_int("overview_top_users", 10, 1, 50)
@@ -326,35 +340,36 @@ class Main(star.Star):
         platform_id: str,
         group_id: str,
     ) -> tuple[str, Path] | None:
-        """Draw every group image at equal weight without repeats per cycle."""
-        entries = [
-            (gallery_name, path)
-            for gallery_name, images in self._non_empty_galleries(
-                platform_id,
-                group_id,
-            )
-            for path in images
+        """Choose a weighted gallery, then draw without repeats inside it."""
+        galleries = [
+            (gallery_name, images, weight)
+            for gallery_name, images in self._non_empty_galleries(platform_id, group_id)
+            if (weight := self._gallery_weight(platform_id, group_id, gallery_name)) > 0
         ]
-        if not entries:
-            self.random_gallery_history.pop((platform_id, group_id), None)
+        if not galleries:
             return None
 
-        history_key = (platform_id, group_id)
+        gallery_name, images, _ = random.choices(
+            galleries,
+            weights=[weight for _, _, weight in galleries],
+            k=1,
+        )[0]
+        history_key = (platform_id, group_id, gallery_name)
         used_paths = self.random_gallery_history.setdefault(history_key, set())
-        current_paths = {str(path.resolve()) for _, path in entries}
+        current_paths = {str(path.resolve()) for path in images}
         used_paths.intersection_update(current_paths)
         available = [
-            (gallery_name, path)
-            for gallery_name, path in entries
+            path
+            for path in images
             if str(path.resolve()) not in used_paths
         ]
         if not available:
             used_paths.clear()
-            available = entries
+            available = images
 
         selected = random.choice(available)
-        used_paths.add(str(selected[1].resolve()))
-        return selected
+        used_paths.add(str(selected.resolve()))
+        return gallery_name, selected
 
     async def _delete_quoted_image(
         self,
@@ -551,11 +566,45 @@ class Main(star.Star):
             yield result
             return
 
+        if text.startswith("权重"):
+            event.stop_event()
+            if not event.is_admin():
+                yield event.plain_result("只有管理员可以设置图库权重。")
+                return
+
+            weight_match = re.fullmatch(
+                r"权重\s+([A-Za-z0-9\u4e00-\u9fff]{1,30})\s+(\S+)",
+                text,
+            )
+            if not weight_match:
+                yield event.plain_result("用法：权重 图库名 数值，例如“权重 猫猫 0.5”。")
+                return
+
+            gallery_name, weight_text = weight_match.groups()
+            try:
+                weight = float(weight_text)
+            except ValueError:
+                weight = -1
+            if not math.isfinite(weight) or not 0 <= weight <= 100:
+                yield event.plain_result("图库权重必须是 0 到 100 之间的数字。")
+                return
+
+            gallery_dir = self.data_dir / platform_id / group_id / gallery_name
+            if not gallery_dir.is_dir():
+                yield event.plain_result(f"“{gallery_name}”图库不存在。")
+                return
+
+            (gallery_dir / ".weight").write_text(f"{weight:g}", encoding="utf-8")
+            yield event.plain_result(
+                f"已将“{gallery_name}”图库的随机权重设为 {weight:g}。"
+            )
+            return
+
         if text in {"随机来点", "随机来只"}:
             event.stop_event()
             selected = self._random_gallery_image(platform_id, group_id)
             if selected is None:
-                yield event.plain_result("当前群还没有可用的图库图片。")
+                yield event.plain_result("当前群没有可参与随机的图库图片。")
                 return
 
             gallery_name, image_path = selected
@@ -667,6 +716,7 @@ class Main(star.Star):
             image_count = len(self._gallery_images(platform_id, group_id, gallery_name))
             await asyncio.to_thread(shutil.rmtree, gallery_dir)
             self.draw_history.pop((platform_id, group_id, gallery_name), None)
+            self.random_gallery_history.pop((platform_id, group_id, gallery_name), None)
             self.gallery_md5_index.pop((platform_id, group_id, gallery_name), None)
             yield event.plain_result(
                 f"已删除“{gallery_name}”图库，共清理 {image_count} 张图片。"

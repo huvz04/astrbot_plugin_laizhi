@@ -280,14 +280,21 @@ class BrowseTests(unittest.TestCase):
                     {"🎲 随机来自图库「猫猫」", "🎲 随机来自图库「狗狗」"},
                 )
 
-    def test_random_commands_do_not_repeat_until_all_images_are_used(self) -> None:
+    def test_random_commands_do_not_repeat_inside_selected_gallery(self) -> None:
         write_png(self.group_dir / "猫猫" / "one.png", "red")
+        write_png(self.group_dir / "猫猫" / "two.png", "green")
         write_png(self.group_dir / "狗狗" / "one.png", "blue")
-        write_png(self.group_dir / "狗狗" / "two.png", "green")
 
         selected_paths: list[str] = []
-        with patch.object(plugin_main.random, "choice", side_effect=lambda items: items[0]):
-            for _ in range(3):
+        with (
+            patch.object(
+                plugin_main.random,
+                "choices",
+                side_effect=lambda items, **kwargs: [items[-1]],
+            ),
+            patch.object(plugin_main.random, "choice", side_effect=lambda items: items[0]),
+        ):
+            for _ in range(2):
                 result = run_handler(self.plugin, FakeEvent("随机来点"))[0]
                 selected_paths.append(
                     next(
@@ -297,7 +304,43 @@ class BrowseTests(unittest.TestCase):
                     )
                 )
 
-        self.assertEqual(len(set(selected_paths)), 3)
+        self.assertEqual(len(set(selected_paths)), 2)
+
+    def test_admin_can_set_persistent_gallery_weight(self) -> None:
+        write_png(self.group_dir / "猫猫" / "one.png", "red")
+
+        denied = run_handler(self.plugin, FakeEvent("权重 猫猫 0.5"))[0]
+        self.assertEqual(denied.text, "只有管理员可以设置图库权重。")
+
+        result = run_handler(
+            self.plugin,
+            FakeEvent("权重 猫猫 0.5", admin=True),
+        )[0]
+        self.assertEqual(result.text, "已将“猫猫”图库的随机权重设为 0.5。")
+        self.assertEqual(
+            (self.group_dir / "猫猫" / ".weight").read_text(encoding="utf-8"),
+            "0.5",
+        )
+        self.assertEqual(
+            self.plugin._gallery_weight("aiocqhttp", "100", "猫猫"),
+            0.5,
+        )
+
+    def test_random_command_uses_gallery_weights_and_skips_zero(self) -> None:
+        write_png(self.group_dir / "猫猫" / "one.png", "red")
+        write_png(self.group_dir / "狗狗" / "one.png", "blue")
+        (self.group_dir / "猫猫" / ".weight").write_text("0", encoding="utf-8")
+
+        with patch.object(
+            plugin_main.random,
+            "choices",
+            side_effect=lambda items, **kwargs: [items[0]],
+        ) as choices:
+            result = run_handler(self.plugin, FakeEvent("随机来点"))[0]
+
+        self.assertEqual(choices.call_args.kwargs["weights"], [1.0])
+        source = next(item.text for item in result.chain if isinstance(item, FakePlain))
+        self.assertEqual(source, "🎲 随机来自图库「狗狗」")
 
     def test_random_commands_require_full_match(self) -> None:
         write_png(self.group_dir / "猫猫" / "one.png", "red")
@@ -468,10 +511,11 @@ class DocumentationTests(unittest.TestCase):
     def test_readme_documents_current_command_contract(self) -> None:
         readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
         self.assertIn("`随机来点`、`随机来只`", readme)
+        self.assertIn("`权重 猫猫 0.5`", readme)
         self.assertIn("`预览全部`", readme)
         self.assertIn("回复图片并发送 `删除 图库名`", readme)
         self.assertIn("`#清理 图库名`", readme)
-        self.assertIn("一轮内不会重复", readme)
+        self.assertIn("近期未出现", readme)
         self.assertNotIn("仅 AstrBot 管理员可用", readme)
         self.assertNotIn("`删除 猫猫` 或 `#清理 猫猫`", readme)
 

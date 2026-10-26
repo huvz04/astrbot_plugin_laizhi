@@ -2,14 +2,16 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width={{ render_width }}, height=100">
 <style>
 * { box-sizing: border-box; }
-body { margin: 0; padding: 24px 24px 12px; background: #fffdf8; color: #292d2b; font-family: "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; }
-.sheet { padding: 12px 18px 0; }
+body { margin: 0; padding: 0; background: #fffdf8; color: #292d2b; font-family: "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; }
+.sheet { padding: 36px 42px 12px; }
+.split-marker { height: 4px; background: #ff00ff; }
 h1 { margin: 0 0 20px; font-size: 28px; line-height: 1.5; }
 h1 span { color: #77796e; font-size: 17px; font-weight: normal; margin-left: 16px; }
 svg { display: block; width: 100%; height: auto; }
-.empty { height: 440px; display: flex; align-items: center; justify-content: center; color: #8e9489; font-size: 24px; }
+.empty { height: 120px; display: flex; align-items: center; justify-content: center; color: #8e9489; font-size: 24px; }
 .ranking { padding: 16px 0; display: grid; gap: 18px; }
 .row { display: grid; grid-template-columns: 30px 48px minmax(0, 1fr) 84px; gap: 14px; align-items: center; }
 .rank { color: #899b90; font-size: 20px; font-weight: bold; }
@@ -23,6 +25,9 @@ svg { display: block; width: 100%; height: auto; }
 </style>
 </head>
 <body>
+{% for chart in charts %}
+{% with kind=chart.kind, contributors=chart.get('contributors', []), largest_contribution=chart.get('largest_contribution', 1), words=chart.get('words', []), recent_days=chart.recent_days %}
+<div class="split-marker"></div>
 <main class="sheet">
   <h1>{{ {'keywords': '关键词分布', 'contributors': '上传者贡献', 'popular': '近期热门词'}[kind] }}<span>{% if kind == 'keywords' %}各图库图片数{% elif kind == 'contributors' %}累计上传图片数{% else %}近 {{ recent_days }} 天调用次数{% endif %}</span></h1>
   {% if kind == 'contributors' %}
@@ -46,10 +51,12 @@ svg { display: block; width: 100%; height: auto; }
     <div class="empty">{% if kind == 'keywords' %}本群还没有可用图库{% else %}近 {{ recent_days }} 天还没有关键词调用记录{% endif %}</div>
   {% endif %}
 </main>
+{% endwith %}
+{% endfor %}
+<div class="split-marker"></div>
 <script>
 document.fonts.ready.then(() => {
-  const cloud = document.querySelector('svg');
-  if (!cloud) return;
+  for (const cloud of document.querySelectorAll('svg')) {
   for (const word of cloud.querySelectorAll('text')) {
     const actual = word.getBBox().width;
     const available = Number(word.dataset.maxWidth);
@@ -61,6 +68,7 @@ document.fonts.ready.then(() => {
   const left = Math.min(0, Math.floor(bounds.x - 10));
   const right = Math.max(1000, Math.ceil(bounds.x + bounds.width + 10));
   cloud.setAttribute('viewBox', `${left} ${Math.floor(bounds.y - 10)} ${right - left} ${Math.ceil(bounds.height + 20)}`);
+  }
 });
 </script>
 </body>

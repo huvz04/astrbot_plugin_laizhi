@@ -35,7 +35,7 @@ async def preview(output: Path) -> None:
         plugin._avatar_data = lambda user_id: "" if user_id == "2" else source
 
         async def render(template: str, data: dict, **kwargs) -> str:
-            path = output / f"{data['kind']}.html"
+            path = output / "batch.html"
             path.write_text(Environment(autoescape=True).from_string(template).render(**data), encoding="utf-8")
             print(path)
             return str(path)
@@ -50,13 +50,14 @@ async def preview(output: Path) -> None:
         }
         data["additions"] = sum(row["count"] for row in data["contributors"])
         data["recent_calls"] = sum(row["count"] for row in data["popular"])
-        for kind in ("keywords", "contributors", "popular"):
-            await plugin._render_overview(data, kind, "aiocqhttp")
+        template = (ROOT / "templates" / "overview.html").read_text(encoding="utf-8")
+        charts = await asyncio.gather(*(plugin._overview_chart(data, kind, "aiocqhttp") for kind in ("keywords", "contributors", "popular")))
+        await render(template, {"charts": charts, "render_width": 1200})
         empty = {**data, "galleries": [], "contributors": [], "popular": [], "additions": 0, "recent_calls": 0, "gallery_count": 0, "image_count": 0}
         output = output / "empty"
         output.mkdir(exist_ok=True)
-        for kind in ("keywords", "contributors", "popular"):
-            await plugin._render_overview(empty, kind, "aiocqhttp")
+        charts = await asyncio.gather(*(plugin._overview_chart(empty, kind, "aiocqhttp") for kind in ("keywords", "contributors", "popular")))
+        await render(template, {"charts": charts, "render_width": 1200})
 
 
 if __name__ == "__main__":

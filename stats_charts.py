@@ -2,6 +2,41 @@ from __future__ import annotations
 
 import math
 import unicodedata
+from pathlib import Path
+
+from PIL import Image, ImageChops
+
+CHART_KINDS = ("keywords", "contributors", "popular")
+
+
+def split_statistics_image(source: Path) -> list[Path]:
+    with Image.open(source) as original:
+        image = original.convert("RGB")
+    samples = (0, image.width // 4, image.width // 2, image.width * 3 // 4, image.width - 1)
+    pixels = image.load()
+    separators: list[list[int]] = []
+    for y in range(image.height):
+        if all(pixels[x, y][0] > 200 and pixels[x, y][1] < 100 and pixels[x, y][2] > 180 for x in samples):
+            if separators and separators[-1][1] == y:
+                separators[-1][1] = y + 1
+            else:
+                separators.append([y, y + 1])
+    if len(separators) != 4:
+        raise ValueError("统计图渲染不完整，无法分成三张图片。")
+    output = []
+    for index, kind in enumerate(CHART_KINDS):
+        panel = image.crop((0, separators[index][1] + 2, image.width, separators[index + 1][0] - 2))
+        background = Image.new("RGB", panel.size, (255, 253, 248))
+        mask = ImageChops.difference(panel, background).convert("L").point(lambda value: 255 if value > 18 else 0)
+        bounds = mask.getbbox()
+        if bounds is None:
+            raise ValueError(f"统计图 {kind} 没有可见内容。")
+        padding = max(8, image.width // 100)
+        panel = panel.crop((0, max(0, bounds[1] - padding), panel.width, min(panel.height, bounds[3] + padding)))
+        path = source.with_name(f"{source.stem}-{kind}.png")
+        panel.save(path, format="PNG")
+        output.append(path)
+    return output
 
 
 def wordcloud_layout(items: list[dict], *, width: int = 1000, height: int = 570) -> list[dict]:

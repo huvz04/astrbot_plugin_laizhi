@@ -85,8 +85,16 @@ class FakeStar:
         options: dict | None = None,
     ) -> str:
         self.last_render = (template, data, options)
-        self.renders.append(data)
-        return f"{data['kind']}.png"
+        self.renders.extend(data["charts"])
+        width = options["viewport_width"]
+        image = PillowImage.new("RGB", (width, 316), (255, 253, 248))
+        for index in range(4):
+            image.paste((255, 0, 255), (0, index * 104, width, index * 104 + 4))
+            if index < 3:
+                image.paste((20, 40, 60), (10, index * 104 + 24, 100, index * 104 + 70))
+        path = self.data_dir / "mock-statistics.png"
+        image.save(path)
+        return str(path)
 
 
 def passthrough_decorator(*args: object, **kwargs: object):
@@ -363,11 +371,17 @@ class BrowseTests(unittest.TestCase):
         (self.group_dir / "空库").mkdir(parents=True)
 
         self.plugin.stats_store.record("GALLERY_CALLED", "aiocqhttp", "100", "狗狗")
-        event = FakeEvent("来只统计")
+        event = FakeEvent("来点统计")
         results = run_handler(self.plugin, event)
 
         self.assertTrue(event.stopped)
-        self.assertEqual([result.image for result in results], ["keywords.png", "contributors.png", "popular.png"])
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].kind, "chain")
+        nodes = results[0].chain[0].nodes
+        self.assertEqual(len(nodes), 3)
+        self.assertEqual([Path(node.content[0].file).name for node in nodes], ["mock-statistics-keywords.png", "mock-statistics-contributors.png", "mock-statistics-popular.png"])
+        self.assertEqual(self.plugin.last_render[2]["viewport_width"], 1200)
+        self.assertEqual(self.plugin.last_render[2]["viewport_height"], 100)
         data = self.plugin.renders[0]
         self.assertEqual(
             data["galleries"],
@@ -376,23 +390,19 @@ class BrowseTests(unittest.TestCase):
         self.assertEqual({word["label"] for word in data["words"]}, {"猫猫(2)", "狗狗(1)"})
         self.assertEqual(self.plugin.renders[2]["words"][0]["label"], "狗狗(1)")
 
-    def test_single_chart_failure_preserves_other_images(self) -> None:
+    def test_batch_render_failure_falls_back_to_text(self) -> None:
         write_png(self.group_dir / "猫猫" / "one.png", "red")
 
-        original_render = self.plugin.html_render
-
         async def fail_render(template: str, data: dict, **kwargs: object) -> str:
-            if data["kind"] == "contributors":
-                raise RuntimeError("renderer unavailable")
-            return await original_render(template, data, **kwargs)
+            raise RuntimeError("renderer unavailable")
 
         self.plugin.html_render = fail_render
         results = run_handler(self.plugin, FakeEvent("来只 统计"))
-        self.assertEqual([result.kind for result in results], ["image", "plain", "image"])
-        self.assertIn("上传者贡献图片生成失败", results[1].text)
-        self.assertIn("猫猫  1 张", results[1].text)
+        self.assertEqual([result.kind for result in results], ["plain"])
+        self.assertIn("统计图片生成失败", results[0].text)
+        self.assertIn("猫猫  1 张", results[0].text)
 
-    def test_three_sends_finish_before_scheduler_can_observe_stop(self) -> None:
+    def test_merged_send_finishes_before_scheduler_can_observe_stop(self) -> None:
         event = FakeEvent("来只统计")
 
         async def first_yield():
@@ -400,7 +410,25 @@ class BrowseTests(unittest.TestCase):
 
         self.assertIsNone(asyncio.run(first_yield()))
         self.assertTrue(event.stopped)
-        self.assertEqual([result.image for result in event.sent], ["keywords.png", "contributors.png", "popular.png"])
+        self.assertEqual(len(event.sent), 1)
+        self.assertEqual(len(event.sent[0].chain[0].nodes), 3)
+
+    def test_all_statistics_aliases_use_one_render_and_one_merged_send(self) -> None:
+        original_render = self.plugin.html_render
+        calls = []
+
+        async def count_render(template: str, data: dict, **kwargs: object) -> str:
+            calls.append(data)
+            return await original_render(template, data, **kwargs)
+
+        self.plugin.html_render = count_render
+        for command in ("来点统计", "来点 统计", "来只统计", "来只 统计"):
+            calls.clear()
+            event = FakeEvent(command)
+            run_handler(self.plugin, event)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(len(event.sent), 1)
+            self.assertEqual(len(event.sent[0].chain[0].nodes), 3)
 
     def test_reserved_keyword_cannot_be_added_or_randomly_drawn(self) -> None:
         write_png(self.group_dir / "统计" / "old.png", "red")

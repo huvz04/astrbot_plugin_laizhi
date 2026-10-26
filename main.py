@@ -23,10 +23,10 @@ from PIL import Image as PillowImage
 try:
     # AstrBot loads plugins as packages, so sibling modules need a relative import.
     from .stats_store import GalleryStatsStore
-    from .stats_charts import wordcloud_layout
+    from .stats_charts import CHART_KINDS, split_statistics_image, wordcloud_layout
 except ImportError:  # pragma: no cover - supports direct local test execution
     from stats_store import GalleryStatsStore
-    from stats_charts import wordcloud_layout
+    from stats_charts import CHART_KINDS, split_statistics_image, wordcloud_layout
 
 PLUGIN_NAME = "astrbot_plugin_laizhi"
 IMAGE_SUFFIXES = {".gif", ".jpeg", ".jpg", ".png", ".webp"}
@@ -356,10 +356,7 @@ class Main(star.Star):
                 return ""
         return "data:image/png;base64," + base64.b64encode(path.read_bytes()).decode("ascii")
 
-    async def _render_overview(self, data: dict, kind: str, platform_id: str) -> str:
-        template_path = Path(__file__).parent / "templates" / "overview.html"
-        template = await asyncio.to_thread(template_path.read_text, encoding="utf-8")
-        width = self._config_int("overview_render_width", 1200, 800, 1800)
+    async def _overview_chart(self, data: dict, kind: str, platform_id: str) -> dict:
         chart = {**data, "kind": kind}
         if kind == "contributors":
             limit = asyncio.Semaphore(4)
@@ -378,16 +375,25 @@ class Main(star.Star):
             ]
             chart["words"] = await asyncio.to_thread(wordcloud_layout, items)
             chart["shown_count"] = len(items)
-        return await self.html_render(
+        return chart
+
+    async def _render_overviews(self, data: dict, platform_id: str) -> list[Path]:
+        template_path = Path(__file__).parent / "templates" / "overview.html"
+        template = await asyncio.to_thread(template_path.read_text, encoding="utf-8")
+        width = self._config_int("overview_render_width", 1200, 800, 1800)
+        charts = await asyncio.gather(*(self._overview_chart(data, kind, platform_id) for kind in CHART_KINDS))
+        path = await self.html_render(
             template,
-            chart,
+            {"charts": charts, "render_width": width},
             return_url=False,
             options={
-                "viewport": {"width": width, "height": 100},
+                "viewport_width": width,
+                "viewport_height": 100,
                 "type": "png",
                 "full_page": True,
             },
         )
+        return await asyncio.to_thread(split_statistics_image, Path(path))
 
     def _random_gallery_image(
         self,
@@ -682,18 +688,20 @@ class Main(star.Star):
             )
             return
 
-        if re.fullmatch(r"来只\s*统计", text):
+        if re.fullmatch(r"(?:来只|来点)\s*统计", text):
             event.stop_event()
             overview_data = await self._overview_data(platform_id, group_id)
-            for kind, title in (("keywords", "关键词分布"), ("contributors", "上传者贡献"), ("popular", "近期热门词")):
-                try:
-                    overview_path = await self._render_overview(overview_data, kind, platform_id)
-                    if not overview_path:
-                        raise ValueError("html_render returned an empty path")
-                    await event.send(event.image_result(str(overview_path)))
-                except Exception:
-                    logger.exception("Failed to render gallery statistics: %s", kind)
-                    await event.send(event.plain_result(f"{title}图片生成失败。\n" + self._overview_text(overview_data)))
+            try:
+                images = await self._render_overviews(overview_data, platform_id)
+            except Exception:
+                logger.exception("Failed to render gallery statistics")
+                await event.send(event.plain_result("统计图片生成失败。\n" + self._overview_text(overview_data)))
+                return
+            nodes = [
+                Comp.Node(uin=event.get_self_id(), name="来只统计", content=[Comp.Image.fromFileSystem(str(path.resolve()))])
+                for path in images
+            ]
+            await event.send(event.chain_result([Comp.Nodes(nodes)]))
             return
 
         delete_image_match = re.fullmatch(r"删除\s*(.+)", text)

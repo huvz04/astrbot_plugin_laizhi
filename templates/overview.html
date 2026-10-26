@@ -4,8 +4,8 @@
 <meta charset="utf-8">
 <style>
 * { box-sizing: border-box; }
-body { margin: 0; padding: 24px; background: #fffdf8; color: #292d2b; font-family: "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; }
-.sheet { padding: 12px 18px; }
+body { margin: 0; padding: 24px 24px 12px; background: #fffdf8; color: #292d2b; font-family: "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; }
+.sheet { padding: 12px 18px 0; }
 h1 { margin: 0 0 20px; font-size: 28px; line-height: 1.5; }
 h1 span { color: #77796e; font-size: 17px; font-weight: normal; margin-left: 16px; }
 svg { display: block; width: 100%; height: auto; }
@@ -39,12 +39,29 @@ svg { display: block; width: 100%; height: auto; }
   {% elif words %}
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 570" role="img">
     {% for word in words %}
-      <text x="{{ word.x }}" y="{{ word.y }}" font-size="{{ word.size }}" font-weight="{{ word.weight }}" dominant-baseline="central" fill="{{ word.color }}" textLength="{{ word.width }}" lengthAdjust="spacingAndGlyphs">{{ word.label | e }}</text>
+      <text x="{{ word.x }}" y="{{ word.y }}" font-size="{{ word.size }}" font-weight="{{ word.weight }}" dominant-baseline="central" fill="{{ word.color }}" data-max-width="{{ word.width }}">{{ word.label | e }}</text>
     {% endfor %}
     </svg>
   {% else %}
     <div class="empty">{% if kind == 'keywords' %}本群还没有可用图库{% else %}近 {{ recent_days }} 天还没有关键词调用记录{% endif %}</div>
   {% endif %}
 </main>
+<script>
+document.fonts.ready.then(() => {
+  const cloud = document.querySelector('svg');
+  if (!cloud) return;
+  for (const word of cloud.querySelectorAll('text')) {
+    const actual = word.getBBox().width;
+    const available = Number(word.dataset.maxWidth);
+    if (actual > available) {
+      word.setAttribute('font-size', Number(word.getAttribute('font-size')) * available / actual);
+    }
+  }
+  const bounds = cloud.getBBox();
+  const left = Math.min(0, Math.floor(bounds.x - 10));
+  const right = Math.max(1000, Math.ceil(bounds.x + bounds.width + 10));
+  cloud.setAttribute('viewBox', `${left} ${Math.floor(bounds.y - 10)} ${right - left} ${Math.ceil(bounds.height + 20)}`);
+});
+</script>
 </body>
 </html>

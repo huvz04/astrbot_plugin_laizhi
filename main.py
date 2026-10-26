@@ -383,7 +383,7 @@ class Main(star.Star):
             chart,
             return_url=False,
             options={
-                "viewport": {"width": width, "height": 900},
+                "viewport": {"width": width, "height": 100},
                 "type": "png",
                 "full_page": True,
             },

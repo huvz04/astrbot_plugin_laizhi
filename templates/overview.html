@@ -4,16 +4,10 @@
 <meta charset="utf-8">
 <style>
 * { box-sizing: border-box; }
-body { margin: 0; padding: 32px; background: #eeeae1; color: #292d2b; font-family: "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; }
-.sheet { background: #fffdf8; border: 1px solid #dedbd1; border-radius: 28px; padding: 36px 42px 24px; }
-.eyebrow { color: #707d72; font-size: 14px; letter-spacing: 4px; font-weight: 700; }
-.header { display: flex; justify-content: space-between; align-items: center; gap: 20px; }
-h1 { margin: 12px 0 8px; font-size: 40px; letter-spacing: 1px; }
-.number { color: #d8dfd8; font-size: 64px; font-weight: 700; }
-.subtitle { color: #77796e; font-size: 17px; line-height: 1.6; }
-.metrics { display: flex; gap: 26px; padding: 16px 0 20px; margin-top: 18px; border-top: 1px solid #e7e7df; }
-.metrics span { font-size: 15px; color: #77796e; }
-.metrics b { font-size: 23px; color: #335f56; margin-right: 7px; }
+body { margin: 0; padding: 24px; background: #fffdf8; color: #292d2b; font-family: "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; }
+.sheet { padding: 12px 18px; }
+h1 { margin: 0 0 20px; font-size: 28px; line-height: 1.5; }
+h1 span { color: #77796e; font-size: 17px; font-weight: normal; margin-left: 16px; }
 svg { display: block; width: 100%; height: auto; }
 .empty { height: 440px; display: flex; align-items: center; justify-content: center; color: #8e9489; font-size: 24px; }
 .ranking { padding: 16px 0; display: grid; gap: 18px; }
@@ -26,28 +20,11 @@ svg { display: block; width: 100%; height: auto; }
 .bar { height: 100%; border-radius: 10px; background: #4b8777; }
 .value { text-align: right; font-size: 25px; font-weight: bold; color: #335f56; }
 .value small { font-size: 13px; font-weight: normal; margin-left: 4px; }
-.note { border-top: 1px solid #e7e7df; margin-top: 18px; padding-top: 16px; color: #8a8b80; font-size: 13px; line-height: 1.7; }
 </style>
 </head>
 <body>
 <main class="sheet">
-  <div class="eyebrow">LAIZHI / GROUP STATISTICS</div>
-  <div class="header">
-    <div>
-      <h1>{{ {'keywords': '关键词分布', 'contributors': '上传者贡献', 'popular': '近期热门词'}[kind] }}</h1>
-      <div class="subtitle">{% if kind == 'keywords' %}本群全部图库 · 以当前图片数量计频{% elif kind == 'contributors' %}本群累计成功上传 · 按新增图片数量排名{% else %}本群近 {{ recent_days }} 天 · 以关键词调用次数计频{% endif %}</div>
-    </div>
-    <div class="number">{{ {'keywords': '01', 'contributors': '02', 'popular': '03'}[kind] }}</div>
-  </div>
-  <div class="metrics">
-    {% if kind == 'keywords' %}
-    <span><b>{{ gallery_count }}</b>个关键词</span><span><b>{{ image_count }}</b>张图片</span><span><b>{{ shown_count }}</b>词展示</span>
-    {% elif kind == 'contributors' %}
-    <span><b>{{ additions }}</b>张累计新增</span><span><b>{{ contributors | length }}</b>位上榜</span>
-    {% else %}
-    <span><b>{{ recent_days }}</b>天统计窗口</span><span><b>{{ recent_calls }}</b>次调用</span><span><b>{{ shown_count }}</b>词展示</span>
-    {% endif %}
-  </div>
+  <h1>{{ {'keywords': '关键词分布', 'contributors': '上传者贡献', 'popular': '近期热门词'}[kind] }}<span>{% if kind == 'keywords' %}各图库图片数{% elif kind == 'contributors' %}累计上传图片数{% else %}近 {{ recent_days }} 天调用次数{% endif %}</span></h1>
   {% if kind == 'contributors' %}
     <section class="ranking">
     {% for item in contributors %}
@@ -62,17 +39,12 @@ svg { display: block; width: 100%; height: auto; }
   {% elif words %}
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 570" role="img">
     {% for word in words %}
-      <text x="{{ word.x }}" y="{{ word.y }}" font-size="{{ word.size }}" font-weight="650" dominant-baseline="central" fill="{{ word.color }}" textLength="{{ word.width }}" lengthAdjust="spacingAndGlyphs">{{ word.label | e }}</text>
+      <text x="{{ word.x }}" y="{{ word.y }}" font-size="{{ word.size }}" font-weight="{{ word.weight }}" dominant-baseline="central" fill="{{ word.color }}" textLength="{{ word.width }}" lengthAdjust="spacingAndGlyphs">{{ word.label | e }}</text>
     {% endfor %}
     </svg>
   {% else %}
     <div class="empty">{% if kind == 'keywords' %}本群还没有可用图库{% else %}近 {{ recent_days }} 天还没有关键词调用记录{% endif %}</div>
   {% endif %}
-  <div class="note">
-  {% if kind == 'keywords' %}关键词 = 图库名；数字 = 该图库当前图片数。{% if gallery_count > shown_count %}展示图片数最多的 {{ shown_count }} 个词。{% endif %}
-  {% elif kind == 'contributors' %}只统计成功新增的图片，重复上传不计数；历史图片不会补猜上传者。头像不可用时显示名字占位。
-  {% else %}数字 = 近 {{ recent_days }} 天成功调用次数；一次批量抽取计一次调用。贡献与调用从统计功能启用后开始记录。{% endif %}
-  </div>
 </main>
 </body>
 </html>

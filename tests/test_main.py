@@ -373,8 +373,8 @@ class BrowseTests(unittest.TestCase):
             data["galleries"],
             [{"name": "猫猫", "count": 2}, {"name": "狗狗", "count": 1}],
         )
-        self.assertEqual({word["label"] for word in data["words"]}, {"猫猫 · 2", "狗狗 · 1"})
-        self.assertEqual(self.plugin.renders[2]["words"][0]["label"], "狗狗 · 1")
+        self.assertEqual({word["label"] for word in data["words"]}, {"猫猫(2)", "狗狗(1)"})
+        self.assertEqual(self.plugin.renders[2]["words"][0]["label"], "狗狗(1)")
 
     def test_single_chart_failure_preserves_other_images(self) -> None:
         write_png(self.group_dir / "猫猫" / "one.png", "red")

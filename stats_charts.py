@@ -8,15 +8,16 @@ def wordcloud_layout(items: list[dict], *, width: int = 1000, height: int = 570)
     if not items:
         return []
     maximum = max(item["count"] for item in items)
-    colors = ("#256c65", "#38799a", "#aa653d", "#665a96", "#6d7940", "#ad526b")
+    colors = ("#155e58", "#206b8c", "#b55426", "#665a96", "#6d7940", "#ad526b")
     for attempt in range(30):
         scale = 0.89 ** attempt
         occupied = [0] * math.ceil(height / 8)
         placed = []
         for rank, item in enumerate(items):
-            label = f"{item['name']} · {item['count']}"
+            label = f"{item['name']}({item['count']})"
             units = sum(1 if unicodedata.east_asian_width(c) in "WF" else 0.6 for c in label)
-            size = min(24 + 48 * math.sqrt(item["count"] / maximum), (width - 40) / units) * scale
+            frequency = item["count"] / maximum
+            size = min(12 + 108 * frequency ** 1.5, (width - 40) / units) * scale
             text_width = units * size
             box_width, box_height = text_width + 16, size * 1.35 + 12
             for step in range(4000):
@@ -37,6 +38,7 @@ def wordcloud_layout(items: list[dict], *, width: int = 1000, height: int = 570)
                         "y": round(y + box_height / 2, 2),
                         "size": round(size, 2), "width": round(text_width, 2),
                         "color": colors[rank % len(colors)],
+                        "weight": 750 if frequency >= 0.6 else 600 if frequency >= 0.2 else 500,
                     })
                     break
             else:

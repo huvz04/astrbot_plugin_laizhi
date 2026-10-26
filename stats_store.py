@@ -108,6 +108,7 @@ class GalleryStatsStore:
                 FROM gallery_events AS events
                 WHERE platform_id = ? AND group_id = ?
                   AND event_type = 'IMAGE_ADDED'
+                  AND gallery_name <> '统计'
                 GROUP BY user_id
                 ORDER BY count DESC, name ASC
                 LIMIT ?
@@ -120,6 +121,7 @@ class GalleryStatsStore:
                 FROM gallery_events
                 WHERE platform_id = ? AND group_id = ?
                   AND event_type = 'GALLERY_CALLED' AND created_at >= ?
+                  AND gallery_name <> '统计'
                 GROUP BY gallery_name
                 ORDER BY count DESC, last_called_at DESC, gallery_name ASC
                 """,
@@ -134,6 +136,7 @@ class GalleryStatsStore:
                              THEN 1 ELSE 0 END) AS recent_calls
                 FROM gallery_events
                 WHERE platform_id = ? AND group_id = ?
+                  AND gallery_name <> '统计'
                 """,
                 (cutoff, platform_id, group_id),
             ).fetchone()

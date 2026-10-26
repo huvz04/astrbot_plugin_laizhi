@@ -9,6 +9,17 @@ from stats_store import GalleryStatsStore
 
 
 class GalleryStatsStoreTests(unittest.TestCase):
+    def test_reserved_gallery_is_excluded_from_historical_statistics(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = GalleryStatsStore(Path(directory) / "stats.db")
+            store.record("IMAGE_ADDED", "qq", "100", "统计", user_id="1")
+            store.record("GALLERY_CALLED", "qq", "100", "统计")
+            overview = store.overview("qq", "100", recent_days=7, top_users=10)
+            self.assertEqual(overview["contributors"], [])
+            self.assertEqual(overview["popular"], [])
+            self.assertEqual(overview["additions"], 0)
+            self.assertEqual(overview["recent_calls"], 0)
+
     def test_rankings_are_group_isolated_and_sorted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = GalleryStatsStore(Path(directory) / "stats.db")

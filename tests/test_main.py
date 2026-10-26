@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import importlib
+import io
 import sys
 import tempfile
 import types
@@ -74,6 +75,7 @@ class FakeStar:
         self.context = context
         self.config = config or {}
         self.last_render: tuple[str, dict, dict | None] | None = None
+        self.renders: list[dict] = []
 
     async def html_render(
         self,
@@ -83,7 +85,8 @@ class FakeStar:
         options: dict | None = None,
     ) -> str:
         self.last_render = (template, data, options)
-        return "overview.png"
+        self.renders.append(data)
+        return f"{data['kind']}.png"
 
 
 def passthrough_decorator(*args: object, **kwargs: object):
@@ -149,6 +152,7 @@ class FakeEvent:
         self._admin = admin
         self.stopped = False
         self.quoted_images: list[str] = []
+        self.sent: list[FakeResult] = []
 
     def get_messages(self) -> list[object]:
         return self._messages
@@ -174,6 +178,9 @@ class FakeEvent:
     def stop_event(self) -> None:
         self.stopped = True
 
+    async def send(self, result: FakeResult) -> None:
+        self.sent.append(result)
+
     def plain_result(self, text: str) -> FakeResult:
         return FakeResult("plain", text=text)
 
@@ -186,7 +193,8 @@ class FakeEvent:
 
 def run_handler(plugin: object, event: FakeEvent) -> list[FakeResult]:
     async def collect() -> list[FakeResult]:
-        return [result async for result in plugin.on_group_message(event)]
+        yielded = [result async for result in plugin.on_group_message(event)]
+        return event.sent + yielded
 
     return asyncio.run(collect())
 
@@ -348,34 +356,86 @@ class BrowseTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(run_handler(self.plugin, FakeEvent(text)), [])
 
-    def test_preview_all_renders_sorted_gallery_overview(self) -> None:
+    def test_statistics_sends_three_charts_with_inventory_and_recent_counts(self) -> None:
         write_png(self.group_dir / "猫猫" / "one.png", "red")
         write_png(self.group_dir / "猫猫" / "two.png", "green")
         write_png(self.group_dir / "狗狗" / "one.png", "blue")
         (self.group_dir / "空库").mkdir(parents=True)
 
-        result = run_handler(self.plugin, FakeEvent("预览全部"))[0]
+        self.plugin.stats_store.record("GALLERY_CALLED", "aiocqhttp", "100", "狗狗")
+        event = FakeEvent("来只统计")
+        results = run_handler(self.plugin, event)
 
-        self.assertEqual(result.kind, "image")
-        self.assertEqual(result.image, "overview.png")
-        self.assertIsNotNone(self.plugin.last_render)
-        data = self.plugin.last_render[1]
+        self.assertTrue(event.stopped)
+        self.assertEqual([result.image for result in results], ["keywords.png", "contributors.png", "popular.png"])
+        data = self.plugin.renders[0]
         self.assertEqual(
             data["galleries"],
             [{"name": "猫猫", "count": 2}, {"name": "狗狗", "count": 1}],
         )
+        self.assertEqual({word["label"] for word in data["words"]}, {"猫猫 · 2", "狗狗 · 1"})
+        self.assertEqual(self.plugin.renders[2]["words"][0]["label"], "狗狗 · 1")
 
-    def test_overview_render_failure_falls_back_to_text(self) -> None:
+    def test_single_chart_failure_preserves_other_images(self) -> None:
         write_png(self.group_dir / "猫猫" / "one.png", "red")
 
-        async def fail_render(*args: object, **kwargs: object) -> str:
-            raise RuntimeError("renderer unavailable")
+        original_render = self.plugin.html_render
+
+        async def fail_render(template: str, data: dict, **kwargs: object) -> str:
+            if data["kind"] == "contributors":
+                raise RuntimeError("renderer unavailable")
+            return await original_render(template, data, **kwargs)
 
         self.plugin.html_render = fail_render
-        result = run_handler(self.plugin, FakeEvent("图库统计"))[0]
-        self.assertEqual(result.kind, "plain")
-        self.assertIn("本群图库总览", result.text)
-        self.assertIn("猫猫  1 张", result.text)
+        results = run_handler(self.plugin, FakeEvent("来只 统计"))
+        self.assertEqual([result.kind for result in results], ["image", "plain", "image"])
+        self.assertIn("上传者贡献图片生成失败", results[1].text)
+        self.assertIn("猫猫  1 张", results[1].text)
+
+    def test_three_sends_finish_before_scheduler_can_observe_stop(self) -> None:
+        event = FakeEvent("来只统计")
+
+        async def first_yield():
+            return await anext(self.plugin.on_group_message(event), None)
+
+        self.assertIsNone(asyncio.run(first_yield()))
+        self.assertTrue(event.stopped)
+        self.assertEqual([result.image for result in event.sent], ["keywords.png", "contributors.png", "popular.png"])
+
+    def test_reserved_keyword_cannot_be_added_or_randomly_drawn(self) -> None:
+        write_png(self.group_dir / "统计" / "old.png", "red")
+        result = run_handler(self.plugin, FakeEvent("添加 统计"))[0]
+        self.assertIn("保留词", result.text)
+        self.assertEqual(self.plugin.pending_additions, {})
+        self.assertIsNone(self.plugin._random_gallery_image("aiocqhttp", "100"))
+        data = asyncio.run(self.plugin._overview_data("aiocqhttp", "100"))
+        self.assertEqual(data["image_count"], 0)
+        self.assertTrue((self.group_dir / "统计" / "old.png").exists())
+
+    def test_statistics_requires_full_command_and_replaces_old_aliases(self) -> None:
+        for text in ("预览全部", "图库统计", "帮我来只统计", "来只统计一下"):
+            with self.subTest(text=text):
+                self.plugin.renders.clear()
+                run_handler(self.plugin, FakeEvent(text))
+                self.assertEqual(self.plugin.renders, [])
+
+    def test_avatar_download_is_embedded_and_cached_with_failure_fallback(self) -> None:
+        with patch.object(plugin_main, "urlopen", return_value=io.BytesIO(png_bytes("blue"))) as fetch:
+            first = self.plugin._avatar_data("200")
+            cached = self.plugin._avatar_data("200")
+        self.assertTrue(first.startswith("data:image/png;base64,"))
+        self.assertEqual(first, cached)
+        self.assertEqual(fetch.call_count, 1)
+        with patch.object(plugin_main, "urlopen", side_effect=OSError("offline")):
+            self.assertEqual(self.plugin._avatar_data("201"), "")
+            self.assertEqual(self.plugin._avatar_data("../200"), "")
+
+    def test_contribution_chart_uses_avatar_name_and_upload_count(self) -> None:
+        self.plugin.stats_store.record("IMAGE_ADDED", "aiocqhttp", "100", "猫猫", user_id="200", user_name="上传者")
+        with patch.object(self.plugin, "_avatar_data", return_value="data:image/png;base64,test"):
+            run_handler(self.plugin, FakeEvent("来只统计"))
+        row = self.plugin.renders[1]["contributors"][0]
+        self.assertEqual((row["name"], row["count"], row["avatar"]), ("上传者", 1, "data:image/png;base64,test"))
 
     def test_ordinary_get_remains_image_only(self) -> None:
         write_png(self.group_dir / "猫猫" / "one.png", "red")
@@ -512,7 +572,7 @@ class DocumentationTests(unittest.TestCase):
         readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
         self.assertIn("`随机来点`、`随机来只`", readme)
         self.assertIn("`权重 猫猫 0.5`", readme)
-        self.assertIn("`预览全部`", readme)
+        self.assertIn("`来只统计`", readme)
         self.assertIn("回复图片并发送 `删除 图库名`", readme)
         self.assertIn("`#清理 图库名`", readme)
         self.assertIn("近期未出现", readme)

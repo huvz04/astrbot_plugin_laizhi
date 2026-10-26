@@ -10,6 +10,7 @@ import re
 import shutil
 import time
 from pathlib import Path
+from urllib.request import urlopen
 
 import astrbot.api.message_components as Comp
 from astrbot.api import logger, star
@@ -22,14 +23,17 @@ from PIL import Image as PillowImage
 try:
     # AstrBot loads plugins as packages, so sibling modules need a relative import.
     from .stats_store import GalleryStatsStore
+    from .stats_charts import wordcloud_layout
 except ImportError:  # pragma: no cover - supports direct local test execution
     from stats_store import GalleryStatsStore
+    from stats_charts import wordcloud_layout
 
 PLUGIN_NAME = "astrbot_plugin_laizhi"
 IMAGE_SUFFIXES = {".gif", ".jpeg", ".jpg", ".png", ".webp"}
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 DEFAULT_MAX_DRAW_COUNT = 20
 PENDING_SECONDS = 30
+GALLERY_BLACKLIST = {"统计"}
 
 
 class Main(star.Star):
@@ -119,6 +123,8 @@ class Main(star.Star):
         Raises:
             ValueError: The payload is empty, too large, or not a supported image.
         """
+        if gallery_name in GALLERY_BLACKLIST:
+            raise ValueError("“统计”是保留词，不能用作图库名。")
         if isinstance(source, Comp.Image):
             encoded = await source.convert_to_base64()
             image_bytes = base64.b64decode(encoded, validate=True)
@@ -203,6 +209,8 @@ class Main(star.Star):
         Returns:
             Image paths found in the gallery.
         """
+        if gallery_name in GALLERY_BLACKLIST:
+            return []
         gallery_dir = self.data_dir / platform_id / group_id / gallery_name
         if not gallery_dir.is_dir():
             return []
@@ -250,7 +258,7 @@ class Main(star.Star):
 
     async def _overview_data(self, platform_id: str, group_id: str) -> dict:
         recent_days = self._config_int("overview_recent_days", 7, 1, 365)
-        top_users = self._config_int("overview_top_users", 10, 1, 50)
+        top_users = self._config_int("overview_top_users", 10, 1, 20)
         max_galleries = self._config_int("overview_max_galleries", 50, 1, 200)
         galleries = sorted(
             (
@@ -277,7 +285,10 @@ class Main(star.Star):
                 "additions": 0,
                 "recent_calls": 0,
             }
-        stats["popular"] = stats["popular"][:max_galleries]
+        stats["popular"] = [
+            item for item in stats["popular"]
+            if item["gallery_name"] not in GALLERY_BLACKLIST
+        ][:max_galleries]
         return {
             **stats,
             "recent_days": recent_days,
@@ -289,13 +300,13 @@ class Main(star.Star):
     @staticmethod
     def _overview_text(data: dict) -> str:
         lines = [
-            "本群图库总览",
+            "本群来只统计",
             (
                 f"图库：{data['gallery_count']} 个｜图片：{data['image_count']} 张｜"
                 f"近 {data['recent_days']} 天调用：{data['recent_calls']} 次"
             ),
             "",
-            "添加贡献榜",
+            "上传者贡献",
         ]
         contributors = data["contributors"]
         lines.extend(
@@ -304,12 +315,12 @@ class Main(star.Star):
         )
         if not contributors:
             lines.append("暂无记录")
-        lines.extend(["", "图库规模榜"])
+        lines.extend(["", "关键词分布（当前图片数）"])
         lines.extend(
             f"{index}. {item['name']}  {item['count']} 张"
             for index, item in enumerate(data["galleries"], start=1)
         )
-        lines.extend(["", f"近 {data['recent_days']} 天热门榜"])
+        lines.extend(["", f"近 {data['recent_days']} 天热门词（调用次数）"])
         popular = data["popular"]
         lines.extend(
             f"{index}. {item['gallery_name']}  {item['count']} 次"
@@ -320,13 +331,56 @@ class Main(star.Star):
         lines.extend(["", "贡献与调用数据自统计功能启用后开始记录。"])
         return "\n".join(lines)
 
-    async def _render_overview(self, data: dict) -> str:
+    def _avatar_data(self, user_id: str) -> str:
+        if not re.fullmatch(r"[0-9]{1,20}", user_id):
+            return ""
+        path = self.data_dir / "avatars" / f"{user_id}.png"
+        try:
+            if path.is_file() and time.time() - path.stat().st_mtime < 86400:
+                return "data:image/png;base64," + base64.b64encode(path.read_bytes()).decode("ascii")
+            with urlopen(f"https://q1.qlogo.cn/g?b=qq&nk={user_id}&s=100", timeout=3) as response:
+                payload = response.read(2 * 1024 * 1024 + 1)
+            if len(payload) > 2 * 1024 * 1024:
+                return ""
+            with PillowImage.open(io.BytesIO(payload)) as image:
+                if max(image.size) > 2048:
+                    return ""
+                image = image.convert("RGB")
+                image.thumbnail((100, 100))
+                output = io.BytesIO()
+                image.save(output, format="PNG")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(output.getvalue())
+        except Exception:
+            if not path.is_file():
+                return ""
+        return "data:image/png;base64," + base64.b64encode(path.read_bytes()).decode("ascii")
+
+    async def _render_overview(self, data: dict, kind: str, platform_id: str) -> str:
         template_path = Path(__file__).parent / "templates" / "overview.html"
         template = await asyncio.to_thread(template_path.read_text, encoding="utf-8")
         width = self._config_int("overview_render_width", 1200, 800, 1800)
+        chart = {**data, "kind": kind}
+        if kind == "contributors":
+            limit = asyncio.Semaphore(4)
+
+            async def avatar(item: dict) -> dict:
+                async with limit:
+                    source = await asyncio.to_thread(self._avatar_data, item["user_id"]) if platform_id == "aiocqhttp" else ""
+                return {**item, "avatar": source}
+
+            chart["contributors"] = await asyncio.gather(*(avatar(item) for item in data["contributors"]))
+            chart["largest_contribution"] = max((item["count"] for item in data["contributors"]), default=1)
+        else:
+            items = data["galleries"] if kind == "keywords" else [
+                {"name": item["gallery_name"], "count": item["count"]}
+                for item in data["popular"]
+            ]
+            chart["words"] = await asyncio.to_thread(wordcloud_layout, items)
+            chart["shown_count"] = len(items)
         return await self.html_render(
             template,
-            data,
+            chart,
             return_url=False,
             options={
                 "viewport": {"width": width, "height": 900},
@@ -445,6 +499,9 @@ class Main(star.Star):
         if add_match:
             event.stop_event()
             gallery_name = add_match.group(1).strip()
+            if gallery_name in GALLERY_BLACKLIST:
+                yield event.plain_result("“统计”是保留词，不能用作图库名。")
+                return
             if not re.fullmatch(r"[A-Za-z0-9\u4e00-\u9fff]{1,30}", gallery_name):
                 yield event.plain_result(
                     "请使用“添加 图库名”，图库名只能包含中英文和数字，最长 30 字。"
@@ -625,17 +682,18 @@ class Main(star.Star):
             )
             return
 
-        if text in {"预览全部", "图库统计"}:
+        if re.fullmatch(r"来只\s*统计", text):
             event.stop_event()
             overview_data = await self._overview_data(platform_id, group_id)
-            try:
-                overview_path = await self._render_overview(overview_data)
-                if not overview_path:
-                    raise ValueError("html_render returned an empty path")
-                yield event.image_result(str(overview_path))
-            except Exception:
-                logger.exception("Failed to render gallery overview")
-                yield event.plain_result(self._overview_text(overview_data))
+            for kind, title in (("keywords", "关键词分布"), ("contributors", "上传者贡献"), ("popular", "近期热门词")):
+                try:
+                    overview_path = await self._render_overview(overview_data, kind, platform_id)
+                    if not overview_path:
+                        raise ValueError("html_render returned an empty path")
+                    await event.send(event.image_result(str(overview_path)))
+                except Exception:
+                    logger.exception("Failed to render gallery statistics: %s", kind)
+                    await event.send(event.plain_result(f"{title}图片生成失败。\n" + self._overview_text(overview_data)))
             return
 
         delete_image_match = re.fullmatch(r"删除\s*(.+)", text)
@@ -727,6 +785,9 @@ class Main(star.Star):
         if get_match:
             event.stop_event()
             gallery_name = get_match.group(1).strip()
+            if gallery_name in GALLERY_BLACKLIST:
+                yield event.plain_result("“统计”是保留词，请发送“来只统计”查看统计。")
+                return
             if not re.fullmatch(r"[A-Za-z0-9\u4e00-\u9fff]{1,30}", gallery_name):
                 yield event.plain_result("图库名不合法。")
                 return

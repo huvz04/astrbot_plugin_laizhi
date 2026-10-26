@@ -6,25 +6,25 @@
     "hint": "用于“抽 数量 图库名”，必须为正整数。"
   },
   "overview_recent_days": {
-    "description": "热门图库统计天数",
+    "description": "近期热门词统计天数",
     "type": "int",
     "default": 7,
-    "hint": "总览中“最近热门榜”的时间窗口，范围 1-365 天。"
+    "hint": "“来只统计”第三张词云的时间窗口，范围 1-365 天。"
   },
   "overview_top_users": {
     "description": "贡献榜显示人数",
     "type": "int",
     "default": 10,
-    "hint": "范围 1-50。"
+    "hint": "“来只统计”贡献榜显示人数，范围 1-20。"
   },
   "overview_max_galleries": {
-    "description": "总览最多显示图库数",
+    "description": "每张词云最多显示关键词数",
     "type": "int",
     "default": 50,
-    "hint": "范围 1-200，避免生成过长图片。"
+    "hint": "范围 1-200，按频次排序；词较多时字号会缩小。"
   },
   "overview_render_width": {
-    "description": "总览图片渲染宽度",
+    "description": "统计图片渲染宽度",
     "type": "int",
     "default": 1200,
     "hint": "范围 800-1800 像素。"

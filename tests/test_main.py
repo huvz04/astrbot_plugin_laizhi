@@ -488,6 +488,127 @@ class BrowseTests(unittest.TestCase):
         self.assertEqual(stats["additions"], 1)
         self.assertEqual(stats["contributors"][0]["name"], "测试用户")
 
+    def test_image_info_reports_qq_and_recorded_time(self) -> None:
+        payload = png_bytes("red")
+        digest = plugin_main.hashlib.md5(payload).hexdigest()
+        path = self.group_dir / "猫猫" / "legacy-name.png"
+        write_png(path, "red")
+        self.plugin.stats_store.record(
+            "IMAGE_ADDED", "aiocqhttp", "100", "猫猫", image_md5=digest,
+            user_id="123456", user_name="原添加者",
+            created_at=plugin_main.datetime(2026, 10, 30, 8, 30, tzinfo=plugin_main.timezone.utc),
+        )
+        event = FakeEvent("图片信息")
+        event._messages.append(FakeImage(data=payload))
+        result = run_handler(self.plugin, event)[0]
+        self.assertIn("图库：猫猫", result.text)
+        self.assertIn("添加人QQ：123456（原添加者）", result.text)
+        self.assertIn("2026-10-30 16:30:00（北京时间）", result.text)
+        self.assertIn(digest, result.text)
+
+    def test_imported_image_provenance_is_unknown_and_other_groups_are_private(self) -> None:
+        payload = png_bytes("red")
+        digest = plugin_main.hashlib.md5(payload).hexdigest()
+        write_png(self.group_dir / "猫猫" / "imported.png", "red")
+        self.plugin.stats_store.record("IMAGE_ADDED", "aiocqhttp", "other", "猫猫", image_md5=digest, user_id="999999")
+        event = FakeEvent("查图 猫猫")
+        event._messages.append(FakeImage(data=payload))
+        result = run_handler(self.plugin, event)[0]
+        self.assertIn("添加人QQ：未知", result.text)
+        self.assertIn("标记时间：未知", result.text)
+        self.assertNotIn("999999", result.text)
+
+    def test_reply_image_query_and_unknown_image(self) -> None:
+        MEDIA_BYTES["info-reply"] = png_bytes("blue")
+        event = FakeEvent("图片信息")
+        event.quoted_images = ["info-reply"]
+        result = run_handler(self.plugin, event)[0]
+        self.assertIn("本群未收录", result.text)
+        self.assertIn("添加人QQ：未知", result.text)
+        self.assertIn("标记时间：未知", result.text)
+        self.assertIn("请回复或附带", run_handler(self.plugin, FakeEvent("图片信息"))[0].text)
+
+    def test_explicit_add_cancels_old_pending_upload(self) -> None:
+        run_handler(self.plugin, FakeEvent("添加 猫猫"))
+        self.assertTrue(self.plugin.pending_additions)
+        event = FakeEvent("添加 狗狗")
+        event._messages.append(FakeImage(data=png_bytes("blue")))
+        run_handler(self.plugin, event)
+        self.assertFalse(self.plugin.pending_additions)
+        next_image = FakeEvent("")
+        next_image._messages.append(FakeImage(data=png_bytes("red")))
+        self.assertEqual(run_handler(self.plugin, next_image), [])
+        self.assertFalse((self.group_dir / "猫猫").exists())
+
+    def test_overwritten_file_does_not_produce_false_duplicate_or_destroy_other_image(self) -> None:
+        red = png_bytes("red")
+        blue = png_bytes("blue")
+
+        async def exercise():
+            path, _ = await self.plugin._store_image(FakeImage(data=red), "aiocqhttp", "100", "猫猫")
+            path.write_bytes(blue)
+            repaired, is_new = await self.plugin._store_image(FakeImage(data=red), "aiocqhttp", "100", "猫猫")
+            return repaired, is_new
+
+        path, is_new = asyncio.run(exercise())
+        self.assertTrue(is_new)
+        self.assertEqual(path.read_bytes(), red)
+        self.assertEqual({image.read_bytes() for image in self.plugin._gallery_images("aiocqhttp", "100", "猫猫")}, {red, blue})
+
+    def test_invalid_and_duplicate_files_are_quarantined_but_healthy_files_survive(self) -> None:
+        folder = self.group_dir / "猫猫"
+        write_png(folder / "first.png", "red")
+        write_png(folder / "second.png", "red")
+        write_png(folder / "valid.png", "blue")
+        (folder / "broken.png").write_bytes(b"broken")
+        (folder / "empty.jpg").write_bytes(b"")
+        (folder / ".weight").write_text("0.5")
+        images = self.plugin._gallery_images("aiocqhttp", "100", "猫猫")
+        self.assertEqual(len(images), 2)
+        quarantined = list((self.plugin.data_dir / "_quarantine" / "aiocqhttp" / "100" / "猫猫").iterdir())
+        self.assertEqual(len(quarantined), 3)
+        self.assertEqual((folder / ".weight").read_text(), "0.5")
+        self.assertEqual(self.plugin._gallery_weight("aiocqhttp", "100", "猫猫"), 0.5)
+        self.assertEqual(len(self.plugin._gallery_images("aiocqhttp", "100", "猫猫")), 2)
+
+    def test_corrupt_canonical_file_is_replaced_by_a_real_new_upload(self) -> None:
+        payload = png_bytes("red")
+        digest = plugin_main.hashlib.md5(payload).hexdigest()
+        write_png(self.group_dir / "猫猫" / f"{digest}.png", "red")
+        self.plugin._gallery_images("aiocqhttp", "100", "猫猫")
+        (self.group_dir / "猫猫" / f"{digest}.png").write_bytes(b"")
+        event = FakeEvent("添加 猫猫")
+        event._messages.append(FakeImage(data=payload))
+        result = run_handler(self.plugin, event)[0]
+        self.assertEqual(result.kind, "chain")
+        self.assertEqual((self.group_dir / "猫猫" / f"{digest}.png").read_bytes(), payload)
+        self.assertEqual(self.plugin.stats_store.image_record("aiocqhttp", "100", "猫猫", digest)["user_id"], "200")
+
+    def test_concurrent_identical_uploads_are_stored_and_recorded_once(self) -> None:
+        payload = png_bytes("red")
+
+        async def exercise():
+            return await asyncio.gather(*(
+                self.plugin._store_image(FakeImage(data=payload), "aiocqhttp", "100", "猫猫", user_id="200")
+                for _ in range(3)
+            ))
+
+        results = asyncio.run(exercise())
+        self.assertEqual(sum(is_new for _, is_new in results), 1)
+        self.assertEqual(len(self.plugin._gallery_images("aiocqhttp", "100", "猫猫")), 1)
+        stats = self.plugin.stats_store.overview("aiocqhttp", "100", recent_days=7, top_users=10)
+        self.assertEqual(stats["additions"], 1)
+
+    def test_deleted_file_is_removed_from_index_without_erasing_historical_contribution(self) -> None:
+        payload = png_bytes("red")
+        path, _ = asyncio.run(self.plugin._store_image(FakeImage(data=payload), "aiocqhttp", "100", "猫猫", user_id="200"))
+        digest = plugin_main.hashlib.md5(payload).hexdigest()
+        path.unlink()
+        self.assertEqual(self.plugin._gallery_images("aiocqhttp", "100", "猫猫"), [])
+        self.assertEqual(self.plugin.gallery_md5_index[("aiocqhttp", "100", "猫猫")], {})
+        self.assertIsNone(self.plugin.stats_store.image_record("aiocqhttp", "100", "猫猫", digest))
+        self.assertEqual(self.plugin.stats_store.overview("aiocqhttp", "100", recent_days=7, top_users=10)["additions"], 1)
+
 
 class DeleteTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -527,6 +648,15 @@ class DeleteTests(unittest.TestCase):
         self.assertEqual(result.text, "已从“猫猫”图库删除这张图片。")
         self.assertFalse(cat_path.exists())
         self.assertTrue(dog_path.exists())
+
+    def test_deleting_legacy_filename_invalidates_its_content_based_metadata(self) -> None:
+        self.add_same_image("猫猫")
+        digest = plugin_main.hashlib.md5(MEDIA_BYTES["quoted"]).hexdigest()
+        self.plugin.stats_store.record("IMAGE_ADDED", "aiocqhttp", "100", "猫猫", image_md5=digest, user_id="111")
+        event = FakeEvent("删除 猫猫", admin=True)
+        event.quoted_images = ["quoted"]
+        run_handler(self.plugin, event)
+        self.assertIsNone(self.plugin.stats_store.image_record("aiocqhttp", "100", "猫猫", digest))
 
     def test_non_admin_reply_delete_changes_nothing(self) -> None:
         image_path = self.add_same_image("猫猫")

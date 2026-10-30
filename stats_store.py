@@ -40,6 +40,8 @@ class GalleryStatsStore:
                     ON gallery_events(platform_id, group_id, event_type, created_at);
                 CREATE INDEX IF NOT EXISTS idx_gallery_events_group_gallery
                     ON gallery_events(platform_id, group_id, gallery_name);
+                CREATE INDEX IF NOT EXISTS idx_gallery_events_image
+                    ON gallery_events(platform_id, group_id, gallery_name, image_md5, id);
                 """
             )
 
@@ -82,6 +84,27 @@ class GalleryStatsStore:
                     timestamp,
                 ),
             )
+
+    def image_record(self, platform_id: str, group_id: str, gallery_name: str, image_md5: str) -> dict | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT user_id, user_name, created_at
+                FROM gallery_events
+                WHERE platform_id = ? AND group_id = ? AND gallery_name = ?
+                  AND image_md5 = ? AND event_type = 'IMAGE_ADDED'
+                  AND id > COALESCE((
+                      SELECT MAX(id) FROM gallery_events
+                      WHERE platform_id = ? AND group_id = ? AND gallery_name = ?
+                        AND (event_type = 'GALLERY_CLEARED'
+                             OR (image_md5 = ? AND event_type IN ('IMAGE_DELETED', 'IMAGE_MISSING')))
+                  ), 0)
+                ORDER BY id ASC LIMIT 1
+                """,
+                (platform_id, group_id, gallery_name, image_md5,
+                 platform_id, group_id, gallery_name, image_md5),
+            ).fetchone()
+        return dict(row) if row else None
 
     def overview(
         self,

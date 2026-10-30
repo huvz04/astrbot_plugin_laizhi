@@ -9,6 +9,19 @@ from stats_store import GalleryStatsStore
 
 
 class GalleryStatsStoreTests(unittest.TestCase):
+    def test_image_record_does_not_reuse_provenance_after_delete_or_clear(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = GalleryStatsStore(Path(directory) / "stats.db")
+            for removal in ("IMAGE_DELETED", "IMAGE_MISSING", "GALLERY_CLEARED"):
+                store.record("IMAGE_ADDED", "qq", "100", "猫猫", image_md5="digest", user_id="first")
+                store.record("IMAGE_ADDED", "qq", "other", "猫猫", image_md5="digest", user_id="other")
+                self.assertEqual(store.image_record("qq", "100", "猫猫", "digest")["user_id"], "first")
+                store.record(removal, "qq", "100", "猫猫", image_md5="digest")
+                self.assertIsNone(store.image_record("qq", "100", "猫猫", "digest"))
+                store.record("IMAGE_ADDED", "qq", "100", "猫猫", image_md5="digest", user_id="new")
+                self.assertEqual(store.image_record("qq", "100", "猫猫", "digest")["user_id"], "new")
+                store.record("GALLERY_CLEARED", "qq", "100", "猫猫")
+
     def test_reserved_gallery_is_excluded_from_historical_statistics(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = GalleryStatsStore(Path(directory) / "stats.db")

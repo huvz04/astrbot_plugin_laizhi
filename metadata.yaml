@@ -1,9 +1,9 @@
 name: astrbot_plugin_laizhi
 display_name: 来只图库
-desc: 按群保存和随机抽取图片，支持词云、头像贡献榜和管理员回复删除。
+desc: 按群保存和随机抽取图片，支持来源查询、自动修复图库和三图统计。
 short_desc: 群聊图库与权重随机，三图展示关键词、上传贡献和近期热门。
 author: huvz04
-version: 1.6.0
+version: 1.7.0
 repo: https://github.com/huvz04/astrbot_plugin_laizhi
 astrbot_version: ">=4.26.0,<5"
 support_platforms:

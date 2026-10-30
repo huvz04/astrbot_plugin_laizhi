@@ -8,7 +8,10 @@ import math
 import random
 import re
 import shutil
+import threading
 import time
+import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.request import urlopen
 
@@ -53,6 +56,8 @@ class Main(star.Star):
         self.draw_history: dict[tuple[str, str, str], set[str]] = {}
         self.random_gallery_history: dict[tuple[str, str, str], set[str]] = {}
         self.gallery_md5_index: dict[tuple[str, str, str], dict[str, Path]] = {}
+        self.gallery_file_cache: dict[tuple[str, str, str], dict[Path, tuple[tuple, str]]] = {}
+        self.gallery_locks: dict[tuple[str, str, str], threading.RLock] = {}
         try:
             self.stats_store: GalleryStatsStore | None = GalleryStatsStore(
                 self.data_dir / "gallery_stats.db"
@@ -84,13 +89,16 @@ class Main(star.Star):
             value = default
         return min(max(value, minimum), maximum)
 
-    async def _record_stat(self, event_type: str, **values) -> None:
+    def _record_stat_sync(self, event_type: str, **values) -> None:
         if self.stats_store is None:
             return
         try:
-            await asyncio.to_thread(self.stats_store.record, event_type, **values)
+            self.stats_store.record(event_type, **values)
         except Exception:
             logger.exception("Failed to persist gallery statistics")
+
+    async def _record_stat(self, event_type: str, **values) -> None:
+        await asyncio.to_thread(self._record_stat_sync, event_type, **values)
 
     @staticmethod
     def _sender_identity(event: AstrMessageEvent) -> tuple[str, str]:
@@ -107,6 +115,9 @@ class Main(star.Star):
         platform_id: str,
         group_id: str,
         gallery_name: str,
+        *,
+        user_id: str = "",
+        user_name: str = "",
     ) -> tuple[Path, bool]:
         """Validate, deduplicate, and store one image.
 
@@ -146,52 +157,88 @@ class Main(star.Star):
             raise ValueError("仅支持 JPEG、PNG、GIF 和 WebP 图片")
 
         gallery_dir = self.data_dir / platform_id / group_id / gallery_name
-        gallery_dir.mkdir(parents=True, exist_ok=True)
         gallery_key = (platform_id, group_id, gallery_name)
-        md5_index = self.gallery_md5_index.get(gallery_key)
-        if md5_index is None:
-
-            def build_md5_index() -> dict[str, Path]:
-                """Build a content hash index, including legacy SHA-named files."""
-                index: dict[str, Path] = {}
-                for existing_path in gallery_dir.iterdir():
-                    if (
-                        not existing_path.is_file()
-                        or existing_path.suffix.lower() not in IMAGE_SUFFIXES
-                    ):
-                        continue
-                    try:
-                        existing_digest = hashlib.md5(
-                            existing_path.read_bytes(),
-                            usedforsecurity=False,
-                        ).hexdigest()
-                    except OSError:
-                        continue
-                    index.setdefault(existing_digest, existing_path)
-                return index
-
-            md5_index = await asyncio.to_thread(build_md5_index)
-            self.gallery_md5_index[gallery_key] = md5_index
-
         digest = hashlib.md5(image_bytes, usedforsecurity=False).hexdigest()
-        existing_path = md5_index.get(digest)
-        if existing_path and existing_path.is_file():
-            return existing_path, False
-
         image_path = gallery_dir / f"{digest}{suffix}"
 
-        def write_exclusive() -> bool:
-            """Write bytes without overwriting a concurrently added duplicate."""
-            try:
+        def store() -> tuple[Path, bool]:
+            with self.gallery_locks.setdefault(gallery_key, threading.RLock()):
+                index = self._refresh_gallery_index(*gallery_key)
+                gallery_dir.mkdir(parents=True, exist_ok=True)
+                if digest in index:
+                    return index[digest], False
+                if image_path.exists():
+                    conflict_digest = next((value for value, path in index.items() if path == image_path), None)
+                    if conflict_digest:
+                        image_path.replace(gallery_dir / f"{conflict_digest}-{uuid.uuid4().hex}{image_path.suffix}")
+                    else:
+                        self._quarantine_image(image_path, gallery_key, "wrong-name")
                 with image_path.open("xb") as image_file:
                     image_file.write(image_bytes)
-            except FileExistsError:
-                return False
-            return True
+                self._refresh_gallery_index(*gallery_key)
+                self._record_stat_sync(
+                    "IMAGE_ADDED", platform_id=platform_id, group_id=group_id,
+                    gallery_name=gallery_name, image_md5=digest,
+                    user_id=user_id, user_name=user_name,
+                )
+                return image_path, True
 
-        is_new = await asyncio.to_thread(write_exclusive)
-        md5_index[digest] = image_path
-        return image_path, is_new
+        return await asyncio.to_thread(store)
+
+    def _quarantine_image(self, path: Path, key: tuple[str, str, str], reason: str) -> None:
+        target_dir = self.data_dir / "_quarantine" / key[0] / key[1] / key[2]
+        target_dir.mkdir(parents=True, exist_ok=True)
+        path.replace(target_dir / f"{reason}-{uuid.uuid4().hex}-{path.name}")
+
+    def _refresh_gallery_index(self, platform_id: str, group_id: str, gallery_name: str) -> dict[str, Path]:
+        key = (platform_id, group_id, gallery_name)
+        directory = self.data_dir / platform_id / group_id / gallery_name
+        with self.gallery_locks.setdefault(key, threading.RLock()):
+            if directory.resolve() != self.data_dir.resolve().joinpath(*key):
+                raise ValueError("图库路径不能指向其他目录")
+            previous = self.gallery_file_cache.get(key, {})
+            cache = {}
+            index = {}
+            paths = sorted(directory.iterdir(), key=lambda path: (len(path.stem) != 32, path.name)) if directory.is_dir() else []
+            for path in paths:
+                if path.is_symlink() or not path.is_file() or path.suffix.lower() not in IMAGE_SUFFIXES:
+                    continue
+                try:
+                    stat = path.stat()
+                    signature = (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+                    if path in previous and previous[path][0] == signature:
+                        digest = previous[path][1]
+                    else:
+                        with PillowImage.open(path) as image:
+                            if image.format not in {"JPEG", "PNG", "GIF", "WEBP"}:
+                                raise ValueError("不支持的图片格式")
+                            image.verify()
+                        hasher = hashlib.md5(usedforsecurity=False)
+                        with path.open("rb") as image_file:
+                            for chunk in iter(lambda: image_file.read(65536), b""):
+                                hasher.update(chunk)
+                        digest = hasher.hexdigest()
+                except (FileNotFoundError, PermissionError):
+                    continue
+                except (OSError, ValueError, SyntaxError, PillowImage.DecompressionBombError):
+                    self._quarantine_image(path, key, "invalid")
+                    continue
+                if digest in index:
+                    self._quarantine_image(path, key, "duplicate")
+                    continue
+                index[digest] = path
+                cache[path] = (signature, digest)
+            for digest in self.gallery_md5_index.get(key, {}).keys() - index.keys():
+                previous_path = self.gallery_md5_index[key][digest]
+                if previous_path.exists() and (previous_path not in cache or cache[previous_path][1] == digest):
+                    continue
+                self._record_stat_sync(
+                    "IMAGE_MISSING", platform_id=platform_id, group_id=group_id,
+                    gallery_name=gallery_name, image_md5=digest,
+                )
+            self.gallery_file_cache[key] = cache
+            self.gallery_md5_index[key] = index
+            return index
 
     def _gallery_images(
         self,
@@ -211,14 +258,7 @@ class Main(star.Star):
         """
         if gallery_name in GALLERY_BLACKLIST:
             return []
-        gallery_dir = self.data_dir / platform_id / group_id / gallery_name
-        if not gallery_dir.is_dir():
-            return []
-        return [
-            path
-            for path in gallery_dir.iterdir()
-            if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES
-        ]
+        return list(self._refresh_gallery_index(platform_id, group_id, gallery_name).values())
 
     def _non_empty_galleries(
         self,
@@ -260,10 +300,11 @@ class Main(star.Star):
         recent_days = self._config_int("overview_recent_days", 7, 1, 365)
         top_users = self._config_int("overview_top_users", 10, 1, 20)
         max_galleries = self._config_int("overview_max_galleries", 50, 1, 200)
+        raw_galleries = await asyncio.to_thread(self._non_empty_galleries, platform_id, group_id)
         galleries = sorted(
             (
                 {"name": name, "count": len(images)}
-                for name, images in self._non_empty_galleries(platform_id, group_id)
+                for name, images in raw_galleries
             ),
             key=lambda item: (-item["count"], item["name"]),
         )
@@ -437,6 +478,9 @@ class Main(star.Star):
         platform_id: str,
         group_id: str,
         gallery_name: str,
+        *,
+        user_id: str = "",
+        user_name: str = "",
     ) -> Path | None:
         """Delete the quoted image only from the explicitly named gallery."""
         image_bytes = await MediaResolver(source, media_type="image").to_bytes()
@@ -445,23 +489,70 @@ class Main(star.Star):
             usedforsecurity=False,
         ).hexdigest()
         gallery_key = (platform_id, group_id, gallery_name)
-        images = self._gallery_images(platform_id, group_id, gallery_name)
-        for path in images:
+
+        def delete() -> Path | None:
+            with self.gallery_locks.setdefault(gallery_key, threading.RLock()):
+                path = self._refresh_gallery_index(*gallery_key).get(digest)
+                if path is None:
+                    return None
+                path.unlink()
+                self.gallery_md5_index.pop(gallery_key, None)
+                self.gallery_file_cache.pop(gallery_key, None)
+                self.draw_history.pop(gallery_key, None)
+                self.random_gallery_history.pop(gallery_key, None)
+                self._record_stat_sync(
+                    "IMAGE_DELETED", platform_id=platform_id, group_id=group_id,
+                    gallery_name=gallery_name, image_md5=digest,
+                    user_id=user_id, user_name=user_name,
+                )
+                return path
+
+        return await asyncio.to_thread(delete)
+
+    async def _image_info(self, source: Comp.Image | str, platform_id: str, group_id: str, gallery_name: str = "") -> str:
+        if isinstance(source, Comp.Image):
+            payload = base64.b64decode(await source.convert_to_base64(), validate=True)
+        else:
+            payload = await MediaResolver(source, media_type="image").to_bytes()
+        if not payload or len(payload) > MAX_IMAGE_BYTES:
+            raise ValueError("图片为空或超过 20 MiB")
+        with PillowImage.open(io.BytesIO(payload)) as image:
+            size, format_name = image.size, image.format
+            image.verify()
+        digest = hashlib.md5(payload, usedforsecurity=False).hexdigest()
+
+        def lookup() -> list[tuple[str, dict | None]]:
+            matches = []
+            galleries = [gallery_name] if gallery_name else [name for name, _ in self._non_empty_galleries(platform_id, group_id)]
+            for name in galleries:
+                if name in GALLERY_BLACKLIST or digest not in self._refresh_gallery_index(platform_id, group_id, name):
+                    continue
+                record = None
+                if self.stats_store is not None:
+                    try:
+                        record = self.stats_store.image_record(platform_id, group_id, name, digest)
+                    except Exception:
+                        logger.exception("Failed to read image provenance")
+                matches.append((name, record))
+            return matches
+
+        matches = await asyncio.to_thread(lookup)
+        lines = ["图片信息", f"格式：{format_name}｜尺寸：{size[0]}×{size[1]}｜大小：{len(payload) / 1024:.1f} KiB", f"MD5：{digest}"]
+        for name, record in matches or [("未知（本群未收录）", None)]:
+            record = record or {}
+            qq = record.get("user_id") or "未知"
+            if not re.fullmatch(r"[0-9]+", qq):
+                qq = "未知"
+            user_name = record.get("user_name") or ""
+            timestamp = "未知"
             try:
-                existing_bytes = await asyncio.to_thread(path.read_bytes)
-            except OSError:
-                continue
-            existing_digest = hashlib.md5(
-                existing_bytes,
-                usedforsecurity=False,
-            ).hexdigest()
-            if existing_digest != digest:
-                continue
-            await asyncio.to_thread(path.unlink)
-            self.gallery_md5_index.pop(gallery_key, None)
-            self.draw_history.pop(gallery_key, None)
-            return path
-        return None
+                date = datetime.fromisoformat(record.get("created_at") or "")
+                if date.tzinfo is not None:
+                    timestamp = date.astimezone(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S（北京时间）")
+            except ValueError:
+                pass
+            lines.extend(["", f"图库：{name}", f"添加人QQ：{qq}" + (f"（{user_name}）" if user_name else ""), f"标记时间：{timestamp}"])
+        return "\n".join(lines)
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=10)
     async def on_group_message(self, event: AstrMessageEvent):
@@ -501,9 +592,30 @@ class Main(star.Star):
             if isinstance(component, Comp.Image)
         ]
 
+        info_match = re.fullmatch(r"(?:图片信息|查图)(?:\s+(.+))?", text)
+        if info_match:
+            event.stop_event()
+            gallery_name = (info_match.group(1) or "").strip()
+            if gallery_name and not re.fullmatch(r"[A-Za-z0-9\u4e00-\u9fff]{1,30}", gallery_name):
+                yield event.plain_result("图库名不合法。")
+                return
+            try:
+                sources = direct_images or await extract_quoted_message_images(event)
+                if not sources:
+                    yield event.plain_result("请回复或附带一张图片发送“图片信息”，也可使用“图片信息 图库名”。")
+                    return
+                info = await self._image_info(sources[0], platform_id, group_id, gallery_name)
+            except Exception:
+                logger.exception("Failed to inspect gallery image")
+                yield event.plain_result("图片信息读取失败，请重新发送图片再试。")
+                return
+            yield event.plain_result(info)
+            return
+
         add_match = re.fullmatch(r"(?:添加|add)\s*(.*)", text, re.IGNORECASE)
         if add_match:
             event.stop_event()
+            self.pending_additions.pop(pending_key, None)
             gallery_name = add_match.group(1).strip()
             if gallery_name in GALLERY_BLACKLIST:
                 yield event.plain_result("“统计”是保留词，不能用作图库名。")
@@ -536,6 +648,7 @@ class Main(star.Star):
             saved_count = 0
             duplicate_count = 0
             saved_paths: list[Path] = []
+            added_by_id, added_by_name = self._sender_identity(event)
             try:
                 for source in image_sources:
                     image_path, is_new = await self._store_image(
@@ -543,20 +656,12 @@ class Main(star.Star):
                         platform_id,
                         group_id,
                         gallery_name,
+                        user_id=added_by_id,
+                        user_name=added_by_name,
                     )
                     if is_new:
                         saved_count += 1
                         saved_paths.append(image_path)
-                        added_by_id, added_by_name = self._sender_identity(event)
-                        await self._record_stat(
-                            "IMAGE_ADDED",
-                            platform_id=platform_id,
-                            group_id=group_id,
-                            gallery_name=gallery_name,
-                            image_md5=image_path.stem,
-                            user_id=added_by_id,
-                            user_name=added_by_name,
-                        )
                     else:
                         duplicate_count += 1
             except Exception as exc:
@@ -580,7 +685,7 @@ class Main(star.Star):
                     ]
                 )
             else:
-                yield event.plain_result("这张图片已经在图库里了。")
+                yield event.plain_result(f"这张图片已经在“{gallery_name}”图库里了，未重复添加。回复图片发送“图片信息”可查询添加人和时间。")
             return
 
         pending = self.pending_additions.get(pending_key)
@@ -593,24 +698,17 @@ class Main(star.Star):
                 return
 
             image_source = direct_images[0]
+            added_by_id, added_by_name = self._sender_identity(event)
             try:
                 image_path, is_new = await self._store_image(
                     image_source,
                     platform_id,
                     group_id,
                     gallery_name,
+                    user_id=added_by_id,
+                    user_name=added_by_name,
                 )
                 if is_new:
-                    added_by_id, added_by_name = self._sender_identity(event)
-                    await self._record_stat(
-                        "IMAGE_ADDED",
-                        platform_id=platform_id,
-                        group_id=group_id,
-                        gallery_name=gallery_name,
-                        image_md5=image_path.stem,
-                        user_id=added_by_id,
-                        user_name=added_by_name,
-                    )
                     result = event.chain_result(
                         [
                             Comp.Image.fromFileSystem(str(image_path.resolve())),
@@ -618,7 +716,7 @@ class Main(star.Star):
                         ]
                     )
                 else:
-                    result = event.plain_result("这张图片已经在图库里了。")
+                    result = event.plain_result(f"这张图片已经在“{gallery_name}”图库里了，未重复添加。回复图片发送“图片信息”可查询添加人和时间。")
             except Exception as exc:
                 logger.exception("Failed to save a pending gallery image")
                 yield event.plain_result(f"图片保存失败：{exc}")
@@ -665,7 +763,7 @@ class Main(star.Star):
 
         if text in {"随机来点", "随机来只"}:
             event.stop_event()
-            selected = self._random_gallery_image(platform_id, group_id)
+            selected = await asyncio.to_thread(self._random_gallery_image, platform_id, group_id)
             if selected is None:
                 yield event.plain_result("当前群没有可参与随机的图库图片。")
                 return
@@ -731,11 +829,14 @@ class Main(star.Star):
                 return
 
             try:
+                deleted_by_id, deleted_by_name = self._sender_identity(event)
                 deleted_path = await self._delete_quoted_image(
                     quoted_images[0],
                     platform_id,
                     group_id,
                     gallery_name,
+                    user_id=deleted_by_id,
+                    user_name=deleted_by_name,
                 )
             except Exception:
                 logger.exception("Failed to delete the replied gallery image")
@@ -747,16 +848,6 @@ class Main(star.Star):
                 )
                 return
 
-            deleted_by_id, deleted_by_name = self._sender_identity(event)
-            await self._record_stat(
-                "IMAGE_DELETED",
-                platform_id=platform_id,
-                group_id=group_id,
-                gallery_name=gallery_name,
-                image_md5=deleted_path.stem,
-                user_id=deleted_by_id,
-                user_name=deleted_by_name,
-            )
             yield event.plain_result(
                 f"已从“{gallery_name}”图库删除这张图片。"
             )
@@ -779,11 +870,24 @@ class Main(star.Star):
                 yield event.plain_result(f"“{gallery_name}”图库不存在。")
                 return
 
-            image_count = len(self._gallery_images(platform_id, group_id, gallery_name))
-            await asyncio.to_thread(shutil.rmtree, gallery_dir)
-            self.draw_history.pop((platform_id, group_id, gallery_name), None)
-            self.random_gallery_history.pop((platform_id, group_id, gallery_name), None)
-            self.gallery_md5_index.pop((platform_id, group_id, gallery_name), None)
+            user_id, user_name = self._sender_identity(event)
+
+            def clear_gallery() -> int:
+                key = (platform_id, group_id, gallery_name)
+                with self.gallery_locks.setdefault(key, threading.RLock()):
+                    count = len(self._gallery_images(*key))
+                    shutil.rmtree(gallery_dir)
+                    self.draw_history.pop(key, None)
+                    self.random_gallery_history.pop(key, None)
+                    self.gallery_md5_index.pop(key, None)
+                    self.gallery_file_cache.pop(key, None)
+                    self._record_stat_sync(
+                        "GALLERY_CLEARED", platform_id=platform_id, group_id=group_id,
+                        gallery_name=gallery_name, user_id=user_id, user_name=user_name,
+                    )
+                    return count
+
+            image_count = await asyncio.to_thread(clear_gallery)
             yield event.plain_result(
                 f"已删除“{gallery_name}”图库，共清理 {image_count} 张图片。"
             )
@@ -800,7 +904,7 @@ class Main(star.Star):
                 yield event.plain_result("图库名不合法。")
                 return
 
-            images = self._gallery_images(platform_id, group_id, gallery_name)
+            images = await asyncio.to_thread(self._gallery_images, platform_id, group_id, gallery_name)
             if not images:
                 yield event.plain_result(f"“{gallery_name}”图库里还没有图片。")
                 return
@@ -832,7 +936,7 @@ class Main(star.Star):
                 yield event.plain_result("图库名不合法。")
                 return
 
-            images = self._gallery_images(platform_id, group_id, gallery_name)
+            images = await asyncio.to_thread(self._gallery_images, platform_id, group_id, gallery_name)
             if not images:
                 yield event.plain_result(f"“{gallery_name}”图库里还没有图片。")
                 return

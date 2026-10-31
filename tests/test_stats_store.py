@@ -61,6 +61,33 @@ class GalleryStatsStoreTests(unittest.TestCase):
             )
             self.assertEqual(overview["additions"], 3)
 
+    def test_historical_batch_draws_are_summed_by_image_count(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "stats.db"
+            store = GalleryStatsStore(database_path)
+            for count in (20, 10, 1):
+                store.record("GALLERY_CALLED", "qq", "100", "猫猫", image_count=count)
+            store.record("GALLERY_CALLED", "qq", "100", "狗狗", image_count=35)
+            store.record("GALLERY_CALLED", "qq", "other", "猫猫", image_count=1000)
+            store.record("GALLERY_CALLED", "other", "100", "猫猫", image_count=1000)
+            store.record("GALLERY_CALLED", "qq", "100", "统计", image_count=1000)
+            store.record(
+                "GALLERY_CALLED", "qq", "100", "旧图库", image_count=1000,
+                created_at=datetime.now(timezone.utc) - timedelta(days=8),
+            )
+            store.record("IMAGE_ADDED", "qq", "100", "猫猫")
+
+            overview = GalleryStatsStore(database_path).overview(
+                "qq", "100", recent_days=7, top_users=10,
+            )
+
+            self.assertEqual(
+                [(row["gallery_name"], row["count"]) for row in overview["popular"]],
+                [("狗狗", 35), ("猫猫", 31)],
+            )
+            self.assertEqual(overview["recent_calls"], 66)
+            self.assertEqual(overview["additions"], 1)
+
     def test_recent_calls_exclude_old_events_and_sort_by_count(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = GalleryStatsStore(Path(directory) / "stats.db")

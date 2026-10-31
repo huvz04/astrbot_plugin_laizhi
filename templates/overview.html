@@ -29,7 +29,7 @@ svg { display: block; width: 100%; height: auto; }
 {% with kind=chart.kind, contributors=chart.get('contributors', []), largest_contribution=chart.get('largest_contribution', 1), words=chart.get('words', []), recent_days=chart.recent_days %}
 <div class="split-marker"></div>
 <main class="sheet">
-  <h1>{{ {'keywords': '关键词分布', 'contributors': '上传者贡献', 'popular': '近期热门词'}[kind] }}<span>{% if kind == 'keywords' %}各图库图片数{% elif kind == 'contributors' %}累计上传图片数{% else %}近 {{ recent_days }} 天调用次数{% endif %}</span></h1>
+  <h1>{{ {'keywords': '关键词分布', 'contributors': '上传者贡献', 'popular': '近期热门词'}[kind] }}<span>{% if kind == 'keywords' %}各图库图片数{% elif kind == 'contributors' %}累计上传图片数{% else %}近 {{ recent_days }} 天取图张数{% endif %}</span></h1>
   {% if kind == 'contributors' %}
     <section class="ranking">
     {% for item in contributors %}
@@ -48,7 +48,7 @@ svg { display: block; width: 100%; height: auto; }
     {% endfor %}
     </svg>
   {% else %}
-    <div class="empty">{% if kind == 'keywords' %}本群还没有可用图库{% else %}近 {{ recent_days }} 天还没有关键词调用记录{% endif %}</div>
+    <div class="empty">{% if kind == 'keywords' %}本群还没有可用图库{% else %}近 {{ recent_days }} 天还没有取图记录{% endif %}</div>
   {% endif %}
 </main>
 {% endwith %}

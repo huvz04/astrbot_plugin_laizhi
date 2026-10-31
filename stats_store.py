@@ -140,7 +140,7 @@ class GalleryStatsStore:
             ).fetchall()
             popular = connection.execute(
                 """
-                SELECT gallery_name, COUNT(*) AS count, MAX(created_at) AS last_called_at
+                SELECT gallery_name, SUM(image_count) AS count, MAX(created_at) AS last_called_at
                 FROM gallery_events
                 WHERE platform_id = ? AND group_id = ?
                   AND event_type = 'GALLERY_CALLED' AND created_at >= ?
@@ -156,7 +156,7 @@ class GalleryStatsStore:
                     SUM(CASE WHEN event_type = 'IMAGE_ADDED' THEN 1 ELSE 0 END)
                         AS additions,
                     SUM(CASE WHEN event_type = 'GALLERY_CALLED' AND created_at >= ?
-                             THEN 1 ELSE 0 END) AS recent_calls
+                             THEN image_count ELSE 0 END) AS recent_calls
                 FROM gallery_events
                 WHERE platform_id = ? AND group_id = ?
                   AND gallery_name <> '统计'

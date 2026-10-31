@@ -364,6 +364,35 @@ class BrowseTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(run_handler(self.plugin, FakeEvent(text)), [])
 
+    def test_batch_draw_statistics_count_actual_images(self) -> None:
+        for index in range(20):
+            write_png(self.group_dir / "猫猫" / f"{index}.png", f"#{index:02x}0000")
+
+        for count, total in ((20, 20), (10, 30)):
+            with self.subTest(count=count):
+                result = run_handler(self.plugin, FakeEvent(f"抽 {count} 猫猫"))[0]
+                self.assertEqual(len(result.chain[0].nodes), count + 1)
+                data = asyncio.run(self.plugin._overview_data("aiocqhttp", "100"))
+                self.assertEqual(data["recent_calls"], total)
+                self.assertEqual(data["popular"][0]["count"], total)
+
+        run_handler(self.plugin, FakeEvent("来点统计"))
+        self.assertEqual(self.plugin.renders[2]["words"][0]["label"], "猫猫(30)")
+        self.assertIn("近 7 天取图：30 张", self.plugin._overview_text(data))
+        self.assertIn("猫猫  30 张", self.plugin._overview_text(data))
+
+    def test_batch_draw_statistics_count_only_available_images(self) -> None:
+        for index, color in enumerate(("red", "green", "blue")):
+            write_png(self.group_dir / "猫猫" / f"{index}.png", color)
+
+        for count, total in ((20, 3), (10, 6)):
+            with self.subTest(count=count):
+                result = run_handler(self.plugin, FakeEvent(f"抽 {count} 猫猫"))[0]
+                self.assertEqual(len(result.chain[0].nodes), 4)
+                data = asyncio.run(self.plugin._overview_data("aiocqhttp", "100"))
+                self.assertEqual(data["recent_calls"], total)
+                self.assertEqual(data["popular"][0]["count"], total)
+
     def test_statistics_sends_three_charts_with_inventory_and_recent_counts(self) -> None:
         write_png(self.group_dir / "猫猫" / "one.png", "red")
         write_png(self.group_dir / "猫猫" / "two.png", "green")

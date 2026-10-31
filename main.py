@@ -344,7 +344,7 @@ class Main(star.Star):
             "本群来只统计",
             (
                 f"图库：{data['gallery_count']} 个｜图片：{data['image_count']} 张｜"
-                f"近 {data['recent_days']} 天调用：{data['recent_calls']} 次"
+                f"近 {data['recent_days']} 天取图：{data['recent_calls']} 张"
             ),
             "",
             "上传者贡献",
@@ -361,15 +361,15 @@ class Main(star.Star):
             f"{index}. {item['name']}  {item['count']} 张"
             for index, item in enumerate(data["galleries"], start=1)
         )
-        lines.extend(["", f"近 {data['recent_days']} 天热门词（调用次数）"])
+        lines.extend(["", f"近 {data['recent_days']} 天热门词（取图张数）"])
         popular = data["popular"]
         lines.extend(
-            f"{index}. {item['gallery_name']}  {item['count']} 次"
+            f"{index}. {item['gallery_name']}  {item['count']} 张"
             for index, item in enumerate(popular, start=1)
         )
         if not popular:
             lines.append("暂无记录")
-        lines.extend(["", "贡献与调用数据自统计功能启用后开始记录。"])
+        lines.extend(["", "贡献与取图数据自统计功能启用后开始记录。"])
         return "\n".join(lines)
 
     def _avatar_data(self, user_id: str) -> str:

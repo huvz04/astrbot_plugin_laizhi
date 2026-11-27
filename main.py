@@ -54,6 +54,7 @@ class Main(star.Star):
         self.data_dir = Path(get_astrbot_data_path()) / "plugin_data" / PLUGIN_NAME
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.pending_additions: dict[tuple[str, str, str], tuple[str, float]] = {}
+        self.pending_votes: dict[tuple[str, str, str], tuple[list[str], float]] = {}
         self.draw_history: dict[tuple[str, str, str], set[str]] = {}
         self.random_gallery_history: dict[tuple[str, str, str], set[str]] = {}
         self.gallery_md5_index: dict[tuple[str, str, str], dict[str, Path]] = {}
@@ -590,22 +591,43 @@ class Main(star.Star):
             lines.extend(["", f"图库：{name}", f"添加人QQ：{qq}" + (f"（{user_name}）" if user_name else ""), f"标记时间：{timestamp}"])
         return "\n".join(lines)
 
-    def _annual_reply(self, text: str, mentions: list, platform_id: str,
-                      group_id: str, sender_id: str) -> str | dict:
+    def _vote_mentions(self, event, components):
+        mentions = [part for part in components if isinstance(part, Comp.At)]
+        raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
+        segments = raw.get("message") if hasattr(raw, "get") else None
+        if isinstance(segments, list):
+            # A failed QQ nickname lookup can drop the normalized At component.
+            names = {str(part.qq): part.name for part in mentions}
+            ids = [str(seg["data"]["qq"]) for seg in segments if isinstance(seg, dict)
+                   and seg.get("type") == "at" and isinstance(seg.get("data"), dict) and "qq" in seg["data"]]
+            if ids:
+                mentions = [Comp.At(qq=uid, name=names.get(uid) or "") for uid in ids]
+        return [part for part in mentions if str(part.qq) != str(event.get_self_id())]
+
+    async def _vote_reply(self, key, categories, mentions):
+        if self.stats_store is None:
+            return "统计数据库暂不可用，请稍后重试。"
+        if any(not 1 <= len(c) <= 40 or not c.isprintable() for c in categories):
+            return "请发送「年度投票 奖项」，每个奖项限 1～40 个字符。"
+        labels = "、".join(f"「{c}」" for c in categories)
+        if not mentions:
+            self.pending_votes[key] = (categories, time.monotonic() + PENDING_SECONDS)
+            return f"{labels}：请发送一条只 @ 一位群成员的消息（{PENDING_SECONDS} 秒内）。"
+        if len(mentions) != 1 or not re.fullmatch(r"[1-9][0-9]{0,19}", str(mentions[0].qq)):
+            return "请发送对一位群成员的提及。"
+        self.pending_votes.pop(key, None)
+        target = mentions[0]
+        platform, group, voter = key
+        name = (target.name or "").strip()
+        await asyncio.to_thread(self.stats_store.cast_votes, platform, group, datetime.now(BEIJING).year,
+                                categories, voter, str(target.qq), name)
+        return f"已登记你在{labels}的投票，投给 {name or target.qq}。"
+
+    def _annual_reply(self, text: str, platform_id: str, group_id: str) -> str | dict:
         store = self.stats_store
         if store is None:
             return "统计数据库暂不可用，请稍后重试。"
         year = datetime.now(BEIJING).year
-        if text.startswith("年度投票"):
-            category = text[len("年度投票"):].strip()
-            if (not 1 <= len(category) <= 40 or not category.isprintable()
-                    or len(mentions) != 1 or not re.fullmatch(r"[1-9][0-9]{0,19}", str(mentions[0].qq))):
-                return "请发送「年度投票 奖项 @一位群成员」，从 QQ 成员列表选择对方。奖项限 1～40 个字符。"
-            target = mentions[0]
-            name = (target.name or "").strip()
-            store.cast_vote(platform_id, group_id, year, category, sender_id, str(target.qq), name)
-            return f"已登记你在「{category}」的一票，投给 {name or target.qq}。"
-
         if text.startswith("年度统计"):
             match = re.fullmatch(r"年度统计(?:\s+([1-9][0-9]{3}))?", text)
             if not match or match[1] == "9999":
@@ -766,6 +788,31 @@ class Main(star.Star):
             re.sub(r"[^A-Za-z0-9_-]", "_", str(event.get_group_id()))[:80] or "unknown"
         )
         sender_id = str(event.get_sender_id())
+        pending_key = (platform_id, group_id, sender_id)
+        now = time.monotonic()
+        for key, (_, deadline) in tuple(self.pending_votes.items()):
+            if deadline <= now:
+                self.pending_votes.pop(key, None)
+        is_vote = text.startswith("年度投票")
+        waiting = self.pending_votes.get(pending_key)
+        if is_vote or (waiting and not plain_text.strip() and
+                       all(isinstance(c, (Comp.Plain, Comp.At)) for c in message_components)):
+            mentions = self._vote_mentions(event, message_components)
+            if is_vote or mentions:
+                event.stop_event()
+                if is_vote:
+                    self.pending_votes.pop(pending_key, None)
+                    categories = list(dict.fromkeys(c.strip() for c in
+                                      re.split(r"[/／]", text[len("年度投票"):])))
+                else:
+                    categories = waiting[0]
+                try:
+                    reply = await self._vote_reply(pending_key, categories, mentions)
+                except Exception:
+                    logger.exception("Failed to record annual votes")
+                    reply = "投票登记失败，请重新发送年度投票命令。"
+                await event.send(event.plain_result(reply))
+                return
         if re.fullmatch(r"(?:年度榜单汇总|(?:删除年度榜单|年度榜单定时)(?:\s+.+)?)", text):
             event.stop_event()
             try:
@@ -775,25 +822,10 @@ class Main(star.Star):
                 result = event.plain_result("年度榜单操作失败，请稍后再试。")
             await event.send(result)
             return
-        if (text.startswith("年度投票") or re.fullmatch(r"年度(?:统计|人物)(?:\s+.+)?", text)):
+        if re.fullmatch(r"年度(?:统计|人物)(?:\s+.+)?", text):
             event.stop_event()
             try:
-                mentions = [part for part in message_components if isinstance(part, Comp.At)]
-                if text.startswith("年度投票"):
-                    raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
-                    segments = raw.get("message") if hasattr(raw, "get") else None
-                    if isinstance(segments, list):
-                        # The adapter can drop an At when the QQ member lookup fails.
-                        names = {str(part.qq): part.name for part in mentions}
-                        ids = [str(seg["data"]["qq"]) for seg in segments
-                               if isinstance(seg, dict) and seg.get("type") == "at"
-                               and isinstance(seg.get("data"), dict) and "qq" in seg["data"]]
-                        if ids:
-                            mentions = [Comp.At(qq=uid, name=names.get(uid) or "") for uid in ids]
-                    mentions = [part for part in mentions if str(part.qq) != str(event.get_self_id())]
-                reply = await asyncio.to_thread(
-                    self._annual_reply, text, mentions, platform_id, group_id, sender_id,
-                )
+                reply = await asyncio.to_thread(self._annual_reply, text, platform_id, group_id)
             except Exception:
                 logger.exception("Annual statistics or vote failed")
                 reply = "年度数据读写失败，请稍后重试。"
@@ -808,9 +840,6 @@ class Main(star.Star):
                 result = event.plain_result(reply)
             await event.send(result)
             return
-        pending_key = (platform_id, group_id, sender_id)
-        now = time.monotonic()
-
         for key, (_, deadline) in tuple(self.pending_additions.items()):
             if deadline <= now:
                 self.pending_additions.pop(key, None)

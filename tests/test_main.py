@@ -420,6 +420,22 @@ class BrowseTests(unittest.TestCase):
             event._messages.extend(mentions)
             self.assertIn("请发送", run_handler(self.plugin, event)[0].text)
 
+    def test_split_vote_and_followup_are_scoped_to_voter(self):
+        prompt = FakeEvent("年度投票 女声优痴/年度逆天")
+        self.assertIn("30 秒", run_handler(self.plugin, prompt)[0].text)
+        mention = FakeEvent("")
+        mention._messages.append(FakeAt("222"))
+        stranger = FakeEvent("")
+        stranger._messages.append(FakeAt("333"))
+        stranger.get_sender_id = lambda: "other"
+        self.assertEqual(run_handler(self.plugin, stranger), [])
+        self.assertIn("已登记", run_handler(self.plugin, mention)[0].text)
+        another = FakeEvent("")
+        another._messages.append(FakeAt("222"))
+        self.assertEqual(run_handler(self.plugin, another), [])
+        boards = self.plugin.stats_store.all_boards("aiocqhttp", "100", plugin_main.datetime.now(plugin_main.BEIJING).year)
+        self.assertEqual([(c, rows[0]["votes"]) for c, rows in boards], [("", 2), ("女声优痴", 1), ("年度逆天", 1)])
+
     def test_vote_after_bot_wake_and_missing_member_lookup(self):
         event = FakeEvent("/年度投票女声优痴")
         event._messages.insert(0, FakeAt(event.get_self_id()))

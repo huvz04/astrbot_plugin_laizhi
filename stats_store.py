@@ -139,19 +139,23 @@ class GalleryStatsStore:
 
     def cast_vote(self, platform_id: str, group_id: str, year: int, category: str,
                   voter: str, nominee: str, name: str) -> None:
+        self.cast_votes(platform_id, group_id, year, [category], voter, nominee, name)
+
+    def cast_votes(self, platform_id: str, group_id: str, year: int, categories: list[str],
+                   voter: str, nominee: str, name: str) -> None:
         with self._connect() as connection:
-            connection.execute("""
+            connection.executemany("""
                 INSERT OR IGNORE INTO annual_nominations(platform_id, group_id, year, category, nominee)
                 VALUES (?, ?, ?, ?, ?)
-            """, (platform_id, group_id, year, category, nominee))
-            connection.execute(
+            """, [(platform_id, group_id, year, category, nominee) for category in categories])
+            connection.executemany(
                 """
                 INSERT INTO annual_votes (platform_id, group_id, year, category, voter, nominee, name)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(platform_id, group_id, year, category, voter)
                 DO UPDATE SET nominee = excluded.nominee, name = excluded.name
                 """,
-                (platform_id, group_id, year, category, voter, nominee, name),
+                [(platform_id, group_id, year, category, voter, nominee, name) for category in categories],
             )
 
     def vote_leaders(self, platform_id: str, group_id: str, year: int,

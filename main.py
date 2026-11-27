@@ -590,7 +590,7 @@ class Main(star.Star):
             lines.extend(["", f"图库：{name}", f"添加人QQ：{qq}" + (f"（{user_name}）" if user_name else ""), f"标记时间：{timestamp}"])
         return "\n".join(lines)
 
-    def _annual_reply(self, text: str, components: list, platform_id: str,
+    def _annual_reply(self, text: str, mentions: list, platform_id: str,
                       group_id: str, sender_id: str) -> str | dict:
         store = self.stats_store
         if store is None:
@@ -598,10 +598,9 @@ class Main(star.Star):
         year = datetime.now(BEIJING).year
         if text.startswith("年度投票"):
             category = text[len("年度投票"):].strip()
-            mentions = [part for part in components if isinstance(part, Comp.At)]
             if (not 1 <= len(category) <= 40 or not category.isprintable()
                     or len(mentions) != 1 or not re.fullmatch(r"[1-9][0-9]{0,19}", str(mentions[0].qq))):
-                return "请发送「年度投票 奖项 @一位群成员」，奖项限 1～40 个字符。"
+                return "请发送「年度投票 奖项 @一位群成员」，从 QQ 成员列表选择对方。奖项限 1～40 个字符。"
             target = mentions[0]
             name = (target.name or "").strip()
             store.cast_vote(platform_id, group_id, year, category, sender_id, str(target.qq), name)
@@ -757,6 +756,8 @@ class Main(star.Star):
             if isinstance(component, Comp.Plain)
         )
         text = plain_text.strip() or event.message_str.strip()
+        if text.startswith("/年度投票"):
+            text = text[1:]
         platform_id = (
             re.sub(r"[^A-Za-z0-9_-]", "_", str(event.get_platform_name()))[:80]
             or "unknown"
@@ -777,8 +778,21 @@ class Main(star.Star):
         if (text.startswith("年度投票") or re.fullmatch(r"年度(?:统计|人物)(?:\s+.+)?", text)):
             event.stop_event()
             try:
+                mentions = [part for part in message_components if isinstance(part, Comp.At)]
+                if text.startswith("年度投票"):
+                    raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
+                    segments = raw.get("message") if hasattr(raw, "get") else None
+                    if isinstance(segments, list):
+                        # The adapter can drop an At when the QQ member lookup fails.
+                        names = {str(part.qq): part.name for part in mentions}
+                        ids = [str(seg["data"]["qq"]) for seg in segments
+                               if isinstance(seg, dict) and seg.get("type") == "at"
+                               and isinstance(seg.get("data"), dict) and "qq" in seg["data"]]
+                        if ids:
+                            mentions = [Comp.At(qq=uid, name=names.get(uid) or "") for uid in ids]
+                    mentions = [part for part in mentions if str(part.qq) != str(event.get_self_id())]
                 reply = await asyncio.to_thread(
-                    self._annual_reply, text, message_components, platform_id, group_id, sender_id,
+                    self._annual_reply, text, mentions, platform_id, group_id, sender_id,
                 )
             except Exception:
                 logger.exception("Annual statistics or vote failed")

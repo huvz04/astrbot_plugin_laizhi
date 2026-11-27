@@ -420,6 +420,15 @@ class BrowseTests(unittest.TestCase):
             event._messages.extend(mentions)
             self.assertIn("请发送", run_handler(self.plugin, event)[0].text)
 
+    def test_vote_after_bot_wake_and_missing_member_lookup(self):
+        event = FakeEvent("/年度投票女声优痴")
+        event._messages.insert(0, FakeAt(event.get_self_id()))
+        event.message_obj = types.SimpleNamespace(raw_message={"message": [
+            {"type": "at", "data": {"qq": event.get_self_id()}},
+            {"type": "text", "data": {"text": "/年度投票女声优痴"}},
+            {"type": "at", "data": {"qq": 12345}}]})
+        self.assertIn("投给 12345", run_handler(self.plugin, event)[0].text)
+
     def test_annual_podium_uses_real_ranks_and_preserves_report(self) -> None:
         from jinja2 import Environment
         output = Path(self.temp_dir.name) / "podium.png"

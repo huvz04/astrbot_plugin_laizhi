@@ -36,6 +36,10 @@ class FakeImage:
     def fromFileSystem(cls, file: str):
         return cls(file)
 
+    @classmethod
+    def fromBytes(cls, data: bytes):
+        return cls(data=data)
+
     async def convert_to_base64(self) -> str:
         return base64.b64encode(self.data or b"").decode("ascii")
 
@@ -465,7 +469,7 @@ class BrowseTests(unittest.TestCase):
             for command in ("年度人物", "年度人物 摄影", "年度来只"):
                 with self.subTest(command=command, count=i):
                     result = run_handler(self.plugin, FakeEvent(command))[0]
-                    self.assertEqual(result.image, str(output))
+                    self.assertEqual(PillowImage.open(io.BytesIO(result.chain[0].data)).format, "PNG")
                     template, data = renderer.call_args.args
                     self.assertEqual([e["rank"] for e in data["entries"]], list(range(1, min(i, 5) + 1)))
                     html = Environment().from_string(template).render(**data)
@@ -473,6 +477,30 @@ class BrowseTests(unittest.TestCase):
                     self.assertEqual(html.count('<article class="rank'), min(i, 3))
                     self.assertEqual(html.count('<div class="runner">'), max(0, min(5, i) - 3))
                     self.assertEqual("年度图库统计" in html, command == "年度来只")
+
+    def test_annual_report_survives_bad_render_or_onebot_image_rejection(self):
+        year = plugin_main.datetime.now(plugin_main.BEIJING).year
+        self.plugin.stats_store.cast_vote("aiocqhttp", "100", year, "摄影", "1", "2", "花")
+        self.plugin._avatar_data = lambda uid: ""
+        path = Path(self.temp_dir.name) / "renderer-result"
+        self.plugin.html_render = AsyncMock(return_value=str(path))
+        for corrupt in (True, False):
+            if corrupt:
+                path.write_bytes(b"service unavailable")
+            else:
+                PillowImage.new("RGB", (8, 8)).save(path, "JPEG")
+            event = FakeEvent("年度来只")
+            attempted = []
+            async def reject_image(result):
+                attempted.append(result.kind)
+                if result.kind == "chain":
+                    self.assertEqual(PillowImage.open(io.BytesIO(result.chain[0].data)).format, "PNG")
+                    raise RuntimeError("unsupported file type: undefined")
+                event.sent.append(result)
+            event.send = reject_image
+            results = run_handler(self.plugin, event)
+            self.assertIn("花　1 票", results[0].text)
+            self.assertEqual(attempted, ["plain"] if corrupt else ["chain", "plain"])
 
     def test_preview_all_and_delete_scoped_board(self):
         self.plugin._avatar_data = lambda uid: ""
@@ -558,7 +586,7 @@ class BrowseTests(unittest.TestCase):
         self.assertEqual(context.send_message.await_count, 4)
         origin, chain = context.send_message.await_args.args
         self.assertEqual(origin, FakeEvent.unified_msg_origin)
-        self.assertEqual(chain.chain[0].file, str(preview))
+        self.assertEqual(PillowImage.open(io.BytesIO(chain.chain[0].data)).format, "PNG")
         titles = [call.args[1]["title"] for call in reboot.html_render.await_args_list]
         self.assertEqual(titles, [f"{year} 年度人物 · 摄影", f"{year} 年度人物 · 绘画"])
         self.assertIn("已发送", send("年度榜单定时"))

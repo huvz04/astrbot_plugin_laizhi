@@ -99,8 +99,7 @@ class Main(star.Star):
                         category, leaders = boards[index]
                         report = self._podium_report(year, category, leaders, [])
                         try:
-                            path = await self._render_podium(report, job["platform_id"])
-                            part = Comp.Image.fromFileSystem(path)
+                            part = await self._render_podium(report, job["platform_id"])
                         except Exception:
                             logger.exception("Failed to render scheduled podium")
                             part = Comp.Plain(report["text"])
@@ -108,7 +107,13 @@ class Main(star.Star):
                         part = Comp.Plain(f"{year} 年本群暂无年度投票榜单。")
                     if not await asyncio.to_thread(store.claim_broadcast, job["id"], int(time.time()), index):
                         break
-                    ok = await asyncio.wait_for(self.context.send_message(job["origin"], MessageChain([part])), 120)
+                    try:
+                        ok = await asyncio.wait_for(self.context.send_message(job["origin"], MessageChain([part])), 120)
+                    except Exception as exc:
+                        if not isinstance(part, Comp.Image) or not self._unsupported_file(exc):
+                            raise
+                        ok = await asyncio.wait_for(self.context.send_message(
+                            job["origin"], MessageChain([Comp.Plain(report["text"])])), 120)
                     if not ok:
                         logger.warning("Annual board delivery was not confirmed for schedule %s", job["id"])
                         break
@@ -677,7 +682,18 @@ class Main(star.Star):
         return {"title": title, "summary": summary, "leaders": [dict(row) for row in leaders],
                 "text": "\n".join(lines)}
 
-    async def _render_podium(self, report: dict, platform_id: str) -> str:
+    @staticmethod
+    def _unsupported_file(exc: Exception) -> bool:
+        return "unsupported file type" in str(exc).lower()
+
+    @staticmethod
+    def _report_image(path):
+        # Verify the renderer produced pixels and give the adapter a standalone RGB PNG.
+        with PillowImage.open(path) as rendered, io.BytesIO() as output:
+            rendered.convert("RGB").save(output, format="PNG")
+            return Comp.Image.fromBytes(output.getvalue())
+
+    async def _render_podium(self, report: dict, platform_id: str) -> Comp.Image:
         template_path = Path(__file__).parent / "templates" / "podium.html"
         template = await asyncio.to_thread(template_path.read_text, encoding="utf-8")
         leaders = report["leaders"]
@@ -692,7 +708,7 @@ class Main(star.Star):
         )
         if not path or not Path(path).is_file():
             raise ValueError("Podium renderer returned no image")
-        return str(Path(path).resolve())
+        return await asyncio.to_thread(self._report_image, path)
 
     async def _board_parts(self, platform_id, group_id, year, bot_id):
         boards = await asyncio.to_thread(self.stats_store.all_boards, platform_id, group_id, year)
@@ -722,7 +738,7 @@ class Main(star.Star):
                                                                          "type": "png", "full_page": True})
                 if not path or not Path(path).is_file():
                     raise ValueError("Board list renderer returned no image")
-                content = Comp.Image.fromFileSystem(str(Path(path).resolve()))
+                content = await asyncio.to_thread(self._report_image, path)
             except Exception:
                 logger.exception("Failed to render annual board list")
                 lines = [title]
@@ -844,14 +860,19 @@ class Main(star.Star):
                 reply = "年度数据读写失败，请稍后重试。"
             if isinstance(reply, dict):
                 try:
-                    path = await self._render_podium(reply, platform_id)
-                    result = event.image_result(path)
+                    image = await self._render_podium(reply, platform_id)
                 except Exception:
                     logger.exception("Failed to render annual podium")
-                    result = event.plain_result(reply["text"])
-            else:
-                result = event.plain_result(reply)
-            await event.send(result)
+                else:
+                    try:
+                        await event.send(event.chain_result([image]))
+                        return
+                    except Exception as exc:
+                        if not self._unsupported_file(exc):
+                            raise
+                        logger.exception("OneBot rejected annual podium image")
+                reply = reply["text"]
+            await event.send(event.plain_result(reply))
             return
         for key, (_, deadline) in tuple(self.pending_additions.items()):
             if deadline <= now:

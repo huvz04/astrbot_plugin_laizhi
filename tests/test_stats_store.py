@@ -23,7 +23,8 @@ class GalleryStatsStoreTests(unittest.TestCase):
             store.record("IMAGE_ADDED", "qq", "100", "猫猫",
                          created_at=datetime.fromisoformat("2026-02-01T04:00:00+00:00"))
             data = store.annual_stats("qq", "100", 2026)
-            self.assertEqual((data["draws"], data["additions"], data["popular"]), (30, 1, [("猫猫", 30)]))
+            self.assertEqual((data["recent_calls"], data["image_count"], data["popular"]),
+                             (30, 1, [{"gallery_name": "猫猫", "count": 30}]))
             for nominee in ("11", "2", "51", "5"):
                 store.cast_vote("qq", "100", 2026, "摄影", nominee, nominee, "")
             for platform, group, year in (("qq", "200", 2026), ("foo", "100", 2026), ("qq", "100", 2025)):

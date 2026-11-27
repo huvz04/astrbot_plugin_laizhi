@@ -418,8 +418,6 @@ class BrowseTests(unittest.TestCase):
         single = run_handler(self.plugin, FakeEvent("年度人物 女声优痴"))[0].text
         self.assertIn("333　1 票", single)
         self.assertNotIn("222", single)
-        self.assertIn("333　2 票", run_handler(self.plugin, FakeEvent("年度来只"))[0].text)
-        self.assertIn("2020 年度图库统计", run_handler(self.plugin, FakeEvent("年度来只 2020"))[0].text)
         self.assertEqual(run_handler(self.plugin, FakeEvent("年度统计")), [])
         for mentions in ([], [FakeAt("all")], [FakeAt("222"), FakeAt("333")]):
             event = FakeEvent("年度投票女声优痴")
@@ -466,7 +464,7 @@ class BrowseTests(unittest.TestCase):
             vote.get_sender_id = lambda: str(i)
             vote._messages.append(FakeAt(str(i), f"成员<{i}>"))
             run_handler(self.plugin, vote)
-            for command in ("年度人物", "年度人物 摄影", "年度来只"):
+            for command in ("年度人物", "年度人物 摄影"):
                 with self.subTest(command=command, count=i):
                     result = run_handler(self.plugin, FakeEvent(command))[0]
                     self.assertEqual(PillowImage.open(io.BytesIO(result.chain[0].data)).format, "PNG")
@@ -476,7 +474,37 @@ class BrowseTests(unittest.TestCase):
                     self.assertIn("成员&lt;1&gt;", html)
                     self.assertEqual(html.count('<article class="rank'), min(i, 3))
                     self.assertEqual(html.count('<div class="runner">'), max(0, min(5, i) - 3))
-                    self.assertEqual("年度图库统计" in html, command == "年度来只")
+                    self.assertNotIn("年度图库统计", html)
+
+    def test_gallery_year_report_is_three_gallery_charts_for_requested_year(self):
+        from datetime import datetime
+        from jinja2 import Environment
+        store = self.plugin.stats_store
+        self.plugin._avatar_data = lambda uid: ""
+        for year, group, name in [(2020, "100", "猫猫"), (2021, "100", "旧图"), (2020, "101", "别群")]:
+            date = datetime(year, 2, 1, tzinfo=plugin_main.BEIJING)
+            store.record("IMAGE_ADDED", "aiocqhttp", group, name, user_id="2", user_name=name, created_at=date)
+            store.record("GALLERY_CALLED", "aiocqhttp", group, name, image_count=20, created_at=date)
+        with patch.object(store, "vote_leaders", side_effect=AssertionError("unexpected vote query")):
+            result = run_handler(self.plugin, FakeEvent("年度来只 2020"))
+        self.assertEqual(len(result), 1)
+        self.assertEqual(len(result[0].chain[0].nodes), 3)
+        template, data, _ = self.plugin.last_render
+        html = Environment().from_string(template).render(**data)
+        for label in ("2020", "猫猫(1)", "猫猫(20)", "上传者贡献", "年度热门词"):
+            self.assertIn(label, html)
+        for label in ("年度人物", "近期热门词", "旧图", "别群"):
+            self.assertNotIn(label, html)
+        self.assertEqual([(r["name"], r["count"]) for r in data["charts"][1]["contributors"]], [("猫猫", 1)])
+        event = FakeEvent("年度来只")
+        async def reject_image(result):
+            if result.kind == "chain":
+                raise RuntimeError("unsupported file type: undefined")
+            event.sent.append(result)
+        event.send = reject_image
+        fallback = run_handler(self.plugin, event)[0].text
+        self.assertIn("年度图库统计", fallback)
+        self.assertNotIn("年度人物", fallback)
 
     def test_annual_report_survives_bad_render_or_onebot_image_rejection(self):
         year = plugin_main.datetime.now(plugin_main.BEIJING).year
@@ -489,7 +517,7 @@ class BrowseTests(unittest.TestCase):
                 path.write_bytes(b"service unavailable")
             else:
                 PillowImage.new("RGB", (8, 8)).save(path, "JPEG")
-            event = FakeEvent("年度来只")
+            event = FakeEvent("年度人物")
             attempted = []
             async def reject_image(result):
                 attempted.append(result.kind)

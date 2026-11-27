@@ -395,11 +395,13 @@ class Main(star.Star):
 
     @staticmethod
     def _overview_text(data: dict) -> str:
+        year = data.get("year")
+        period = f"{year} 年" if year else f"近 {data['recent_days']} 天"
         lines = [
-            "本群来只统计",
+            f"{year} 年度图库统计" if year else "本群来只统计",
             (
-                f"图库：{data['gallery_count']} 个｜图片：{data['image_count']} 张｜"
-                f"近 {data['recent_days']} 天取图：{data['recent_calls']} 张"
+                f"图库：{data['gallery_count']} 个｜{'新增' if year else '图片'}：{data['image_count']} 张｜"
+                f"{period}取图：{data['recent_calls']} 张"
             ),
             "",
             "上传者贡献",
@@ -411,12 +413,12 @@ class Main(star.Star):
         )
         if not contributors:
             lines.append("暂无记录")
-        lines.extend(["", "关键词分布（当前图片数）"])
+        lines.extend(["", "关键词分布（全年新增图片数）" if year else "关键词分布（当前图片数）"])
         lines.extend(
             f"{index}. {item['name']}  {item['count']} 张"
             for index, item in enumerate(data["galleries"], start=1)
         )
-        lines.extend(["", f"近 {data['recent_days']} 天热门词（取图张数）"])
+        lines.extend(["", f"{period}热门词（取图张数）"])
         popular = data["popular"]
         lines.extend(
             f"{index}. {item['gallery_name']}  {item['count']} 张"
@@ -424,6 +426,9 @@ class Main(star.Star):
         )
         if not popular:
             lines.append("暂无记录")
+        if year and data.get("first_at"):
+            first = datetime.fromisoformat(data["first_at"]).astimezone(BEIJING).date()
+            lines.append(f"本年首条上传或取图记录：{first}")
         lines.extend(["", "贡献与取图数据自统计功能启用后开始记录。"])
         return "\n".join(lines)
 
@@ -651,23 +656,13 @@ class Main(star.Star):
             if not match or match[1] == "9999":
                 return "请发送「年度来只」或「年度来只 2026」。"
             year = int(match[1]) if match[1] else year
-            data = store.annual_stats(platform_id, group_id, year)
-            lines = [f"{year} 年度图库统计"]
-            if data["first_at"]:
-                first = datetime.fromisoformat(data["first_at"]).astimezone(BEIJING).date()
-                lines.extend([f"本年首条上传或取图记录 {first}",
-                              f"新增 {data['additions']} 张 · 取图 {data['draws']} 张"])
-                if data["popular"]:
-                    lines.append("热门图库 " + "、".join(f"{n}({v})" for n, v in data["popular"]))
-            else:
-                lines.append("本年暂无上传或取图记录")
-            category = ""
-        else:
-            lines = []
-            category = text[len("年度人物"):].strip()
+            return store.annual_stats(platform_id, group_id, year,
+                                      self._config_int("overview_top_users", 10, 1, 20),
+                                      self._config_int("overview_max_galleries", 50, 1, 200))
+        category = text[len("年度人物"):].strip()
 
         leaders = store.vote_leaders(platform_id, group_id, year, category)
-        return self._podium_report(year, category, leaders, lines)
+        return self._podium_report(year, category, leaders, [])
 
     @staticmethod
     def _podium_report(year, category, leaders, lines):
@@ -863,13 +858,19 @@ class Main(star.Star):
             if isinstance(reply, dict):
                 try:
                     logger.info(f"{trace} 数据已就绪，开始生成图片")
-                    image = await self._render_podium(reply, platform_id)
+                    if "year" in reply:
+                        paths = await self._render_overviews(reply, platform_id)
+                        images = await asyncio.gather(*(asyncio.to_thread(self._report_image, path) for path in paths))
+                        parts = [Comp.Nodes([Comp.Node(uin=event.get_self_id(), name=f"{reply['year']} 年度来只",
+                                                       content=[image]) for image in images])]
+                    else:
+                        parts = [await self._render_podium(reply, platform_id)]
                 except Exception:
                     logger.exception(f"{trace} 图片生成失败，改发文字")
                 else:
                     logger.info(f"{trace} PNG 已生成，开始发送")
                     try:
-                        await event.send(event.chain_result([image]))
+                        await event.send(event.chain_result(parts))
                         logger.info(f"{trace} 图片发送成功")
                         return
                     except Exception as exc:
@@ -877,7 +878,7 @@ class Main(star.Star):
                             logger.exception(f"{trace} 图片发送失败")
                             raise
                         logger.exception(f"{trace} OneBot 拒绝图片格式，改发文字")
-                reply = reply["text"]
+                reply = self._overview_text(reply) if "year" in reply else reply["text"]
             logger.info(f"{trace} 开始发送文字")
             try:
                 await event.send(event.plain_result(reply))

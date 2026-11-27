@@ -256,10 +256,11 @@ class GalleryStatsStore:
             connection.execute("""UPDATE annual_broadcasts SET sent=?, board_index=?, next_try=0
                                WHERE id=? AND board_index=?""", (finished, index + 1, job_id, index))
 
-    def annual_stats(self, platform_id: str, group_id: str, year: int) -> dict:
+    def annual_stats(self, platform_id: str, group_id: str, year: int, top_users=10, max_galleries=50) -> dict:
         start, end = (datetime(y, 1, 1, tzinfo=BEIJING).astimezone(timezone.utc).isoformat()
                       for y in (year, year + 1))
         with self._connect() as connection:
+            connection.execute("BEGIN")
             rows = connection.execute(
                 """
                 SELECT gallery_name, MIN(created_at) AS first_at,
@@ -272,11 +273,27 @@ class GalleryStatsStore:
                 ORDER BY draws DESC, gallery_name
                 """, (platform_id, group_id, start, end),
             ).fetchall()
+            contributors = connection.execute("""
+                SELECT user_id, COUNT(*) AS count,
+                       COALESCE(NULLIF(user_name,''), NULLIF(user_id,''), '未知用户') AS name,
+                       MAX(id) AS latest_id
+                FROM gallery_events
+                WHERE platform_id=? AND group_id=? AND created_at>=? AND created_at<?
+                  AND gallery_name <> '统计' AND event_type='IMAGE_ADDED'
+                GROUP BY user_id ORDER BY count DESC, name, user_id LIMIT ?
+            """, (platform_id, group_id, start, end, top_users)).fetchall()
+        by_uploads = sorted(rows, key=lambda row: (-row["additions"], row["gallery_name"]))
         return {
+            "year": year,
             "first_at": min((row["first_at"] for row in rows), default=None),
-            "additions": sum(row["additions"] for row in rows),
-            "draws": sum(row["draws"] for row in rows),
-            "popular": [(row["gallery_name"], row["draws"]) for row in rows[:3] if row["draws"]],
+            "image_count": sum(row["additions"] for row in rows),
+            "gallery_count": len(rows),
+            "recent_calls": sum(row["draws"] for row in rows),
+            "galleries": [{"name": r["gallery_name"], "count": r["additions"]}
+                          for r in by_uploads[:max_galleries] if r["additions"]],
+            "popular": [{"gallery_name": r["gallery_name"], "count": r["draws"]}
+                        for r in rows[:max_galleries] if r["draws"]],
+            "contributors": [dict(row) for row in contributors],
         }
 
     def overview(

@@ -9,6 +9,27 @@ from stats_store import GalleryStatsStore
 
 
 class GalleryStatsStoreTests(unittest.TestCase):
+    def test_annual_data_uses_beijing_year_and_persistent_group_votes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "stats.db"
+            store = GalleryStatsStore(path)
+            for date, count in (("2025-12-31T15:59:59+00:00", 1),
+                                ("2025-12-31T16:00:00+00:00", 20),
+                                ("2026-12-31T15:59:59+00:00", 10),
+                                ("2026-12-31T16:00:00+00:00", 5)):
+                store.record("GALLERY_CALLED", "qq", "100", "猫猫", image_count=count,
+                             created_at=datetime.fromisoformat(date))
+            store.record("IMAGE_ADDED", "qq", "100", "猫猫",
+                         created_at=datetime.fromisoformat("2026-02-01T04:00:00+00:00"))
+            data = store.annual_stats("qq", "100", 2026)
+            self.assertEqual((data["draws"], data["additions"], data["popular"]), (30, 1, [("猫猫", 30)]))
+            for nominee in ("11", "2", "51", "5"):
+                store.cast_vote("qq", "100", 2026, "摄影", nominee, nominee, "")
+            for platform, group, year in (("qq", "200", 2026), ("foo", "100", 2026), ("qq", "100", 2025)):
+                store.cast_vote(platform, group, year, "摄影", "123", "51", "")
+            leaders = GalleryStatsStore(path).vote_leaders("qq", "100", 2026)
+            self.assertEqual([(r["nominee"], r["votes"]) for r in leaders], [("2", 1), ("5", 1), ("11", 1)])
+
     def test_image_record_does_not_reuse_provenance_after_delete_or_clear(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = GalleryStatsStore(Path(directory) / "stats.db")

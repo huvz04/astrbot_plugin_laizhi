@@ -25,10 +25,10 @@ from PIL import Image as PillowImage
 
 try:
     # AstrBot loads plugins as packages, so sibling modules need a relative import.
-    from .stats_store import GalleryStatsStore
+    from .stats_store import BEIJING, GalleryStatsStore
     from .stats_charts import CHART_KINDS, split_statistics_image, wordcloud_layout
 except ImportError:  # pragma: no cover - supports direct local test execution
-    from stats_store import GalleryStatsStore
+    from stats_store import BEIJING, GalleryStatsStore
     from stats_charts import CHART_KINDS, split_statistics_image, wordcloud_layout
 
 PLUGIN_NAME = "astrbot_plugin_laizhi"
@@ -554,6 +554,51 @@ class Main(star.Star):
             lines.extend(["", f"图库：{name}", f"添加人QQ：{qq}" + (f"（{user_name}）" if user_name else ""), f"标记时间：{timestamp}"])
         return "\n".join(lines)
 
+    def _annual_reply(self, text: str, components: list, platform_id: str,
+                      group_id: str, sender_id: str) -> str:
+        store = self.stats_store
+        if store is None:
+            return "统计数据库暂不可用，请稍后重试。"
+        year = datetime.now(BEIJING).year
+        if text.startswith("年度投票"):
+            category = text[len("年度投票"):].strip()
+            mentions = [part for part in components if isinstance(part, Comp.At)]
+            if (not 1 <= len(category) <= 40 or not category.isprintable()
+                    or len(mentions) != 1 or not re.fullmatch(r"[1-9][0-9]{0,19}", str(mentions[0].qq))):
+                return "请发送「年度投票 奖项 @一位群成员」，奖项限 1～40 个字符。"
+            target = mentions[0]
+            name = (target.name or "").strip()
+            store.cast_vote(platform_id, group_id, year, category, sender_id, str(target.qq), name)
+            return f"已登记你在「{category}」的一票，投给 {name or target.qq}。"
+
+        if text.startswith("年度统计"):
+            match = re.fullmatch(r"年度统计(?:\s+([1-9][0-9]{3}))?", text)
+            if not match or match[1] == "9999":
+                return "请发送「年度统计」或「年度统计 2026」。"
+            year = int(match[1]) if match[1] else year
+            data = store.annual_stats(platform_id, group_id, year)
+            lines = [f"{year} 年度图库统计"]
+            if data["first_at"]:
+                first = datetime.fromisoformat(data["first_at"]).astimezone(BEIJING).date()
+                lines.extend([f"本年首条上传或取图记录 {first}",
+                              f"新增 {data['additions']} 张 · 取图 {data['draws']} 张"])
+                if data["popular"]:
+                    lines.append("热门图库 " + "、".join(f"{n}({v})" for n, v in data["popular"]))
+            else:
+                lines.append("本年暂无上传或取图记录")
+            category = ""
+        else:
+            lines = []
+            category = text[len("年度人物"):].strip()
+
+        leaders = store.vote_leaders(platform_id, group_id, year, category)
+        lines.append(f"{year} 年度人物 · {category or '总榜'}")
+        lines.extend(f"{i}. {row['display_name']}　{row['votes']} 票"
+                     for i, row in enumerate(leaders, 1))
+        if not leaders:
+            lines.append("暂无投票")
+        return "\n".join(lines)
+
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=10)
     async def on_group_message(self, event: AstrMessageEvent):
         """Handle gallery commands and pending image additions.
@@ -579,6 +624,17 @@ class Main(star.Star):
             re.sub(r"[^A-Za-z0-9_-]", "_", str(event.get_group_id()))[:80] or "unknown"
         )
         sender_id = str(event.get_sender_id())
+        if (text.startswith("年度投票") or re.fullmatch(r"年度(?:统计|人物)(?:\s+.+)?", text)):
+            event.stop_event()
+            try:
+                reply = await asyncio.to_thread(
+                    self._annual_reply, text, message_components, platform_id, group_id, sender_id,
+                )
+            except Exception:
+                logger.exception("Annual statistics or vote failed")
+                reply = "年度数据读写失败，请稍后重试。"
+            yield event.plain_result(reply)
+            return
         pending_key = (platform_id, group_id, sender_id)
         now = time.monotonic()
 

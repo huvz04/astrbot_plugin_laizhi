@@ -4,6 +4,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+BEIJING = timezone(timedelta(hours=8))
 
 class GalleryStatsStore:
     """Persist group-isolated gallery events and aggregate rankings."""
@@ -42,6 +43,16 @@ class GalleryStatsStore:
                     ON gallery_events(platform_id, group_id, gallery_name);
                 CREATE INDEX IF NOT EXISTS idx_gallery_events_image
                     ON gallery_events(platform_id, group_id, gallery_name, image_md5, id);
+                CREATE TABLE IF NOT EXISTS annual_votes (
+                    platform_id TEXT NOT NULL,
+                    group_id TEXT NOT NULL,
+                    year INTEGER NOT NULL,
+                    category TEXT NOT NULL,
+                    voter TEXT NOT NULL,
+                    nominee TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    PRIMARY KEY (platform_id, group_id, year, category, voter)
+                );
                 """
             )
 
@@ -105,6 +116,59 @@ class GalleryStatsStore:
                  platform_id, group_id, gallery_name, image_md5),
             ).fetchone()
         return dict(row) if row else None
+
+    def cast_vote(self, platform_id: str, group_id: str, year: int, category: str,
+                  voter: str, nominee: str, name: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO annual_votes (platform_id, group_id, year, category, voter, nominee, name)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(platform_id, group_id, year, category, voter)
+                DO UPDATE SET nominee = excluded.nominee, name = excluded.name
+                """,
+                (platform_id, group_id, year, category, voter, nominee, name),
+            )
+
+    def vote_leaders(self, platform_id: str, group_id: str, year: int,
+                     category: str = "") -> list[sqlite3.Row]:
+        with self._connect() as connection:
+            return connection.execute(
+                """
+                SELECT nominee, COALESCE(MAX(NULLIF(name, '')), nominee) AS display_name,
+                       COUNT(*) AS votes
+                FROM annual_votes
+                WHERE platform_id = ? AND group_id = ? AND year = ?
+                  AND (? = '' OR category = ?)
+                GROUP BY nominee
+                ORDER BY votes DESC, LENGTH(nominee), nominee
+                LIMIT 3
+                """,
+                (platform_id, group_id, year, category, category),
+            ).fetchall()
+
+    def annual_stats(self, platform_id: str, group_id: str, year: int) -> dict:
+        start, end = (datetime(y, 1, 1, tzinfo=BEIJING).astimezone(timezone.utc).isoformat()
+                      for y in (year, year + 1))
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT gallery_name, MIN(created_at) AS first_at,
+                       SUM(CASE WHEN event_type = 'IMAGE_ADDED' THEN 1 ELSE 0 END) AS additions,
+                       SUM(CASE WHEN event_type = 'GALLERY_CALLED' THEN image_count ELSE 0 END) AS draws
+                FROM gallery_events
+                WHERE platform_id = ? AND group_id = ? AND created_at >= ? AND created_at < ?
+                  AND gallery_name <> '统计' AND event_type IN ('IMAGE_ADDED', 'GALLERY_CALLED')
+                GROUP BY gallery_name
+                ORDER BY draws DESC, gallery_name
+                """, (platform_id, group_id, start, end),
+            ).fetchall()
+        return {
+            "first_at": min((row["first_at"] for row in rows), default=None),
+            "additions": sum(row["additions"] for row in rows),
+            "draws": sum(row["draws"] for row in rows),
+            "popular": [(row["gallery_name"], row["draws"]) for row in rows[:3] if row["draws"]],
+        }
 
     def overview(
         self,

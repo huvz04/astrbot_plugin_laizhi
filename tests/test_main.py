@@ -21,6 +21,12 @@ class FakePlain:
         self.text = text
 
 
+class FakeAt:
+    def __init__(self, qq: str, name: str = "") -> None:
+        self.qq = qq
+        self.name = name
+
+
 class FakeImage:
     def __init__(self, file: str = "", data: bytes | None = None) -> None:
         self.file = file
@@ -123,6 +129,7 @@ def install_astrbot_stubs() -> None:
         event_message_type=passthrough_decorator,
     )
     components.Image = FakeImage
+    components.At = FakeAt
     components.Plain = FakePlain
     components.Node = FakeNode
     components.Nodes = FakeNodes
@@ -392,6 +399,22 @@ class BrowseTests(unittest.TestCase):
                 data = asyncio.run(self.plugin._overview_data("aiocqhttp", "100"))
                 self.assertEqual(data["recent_calls"], total)
                 self.assertEqual(data["popular"][0]["count"], total)
+
+    def test_annual_vote_commands(self) -> None:
+        for category, target in (("女声优痴", "222"), ("女声优痴", "333"),
+                                 ("女声优痴", "333"), ("摄影", "333")):
+            event = FakeEvent(f"年度投票{category} ")
+            event._messages.append(FakeAt(target))
+            self.assertIn("已登记", run_handler(self.plugin, event)[0].text)
+        self.assertIn("333　2 票", run_handler(self.plugin, FakeEvent("年度人物"))[0].text)
+        single = run_handler(self.plugin, FakeEvent("年度人物 女声优痴"))[0].text
+        self.assertIn("333　1 票", single)
+        self.assertNotIn("222", single)
+        self.assertIn("333　2 票", run_handler(self.plugin, FakeEvent("年度统计"))[0].text)
+        for mentions in ([], [FakeAt("all")], [FakeAt("222"), FakeAt("333")]):
+            event = FakeEvent("年度投票女声优痴")
+            event._messages.extend(mentions)
+            self.assertIn("请发送", run_handler(self.plugin, event)[0].text)
 
     def test_statistics_sends_three_charts_with_inventory_and_recent_counts(self) -> None:
         write_png(self.group_dir / "猫猫" / "one.png", "red")

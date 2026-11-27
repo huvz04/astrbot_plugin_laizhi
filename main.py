@@ -17,7 +17,7 @@ from urllib.request import urlopen
 
 import astrbot.api.message_components as Comp
 from astrbot.api import logger, star
-from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 from astrbot.core.utils.media_utils import MediaResolver
 from astrbot.core.utils.quoted_message import extract_quoted_message_images
@@ -50,6 +50,7 @@ class Main(star.Star):
         """
         super().__init__(context, config)
         self.config = config or {}
+        self._broadcast_task: asyncio.Task | None = None
         self.data_dir = Path(get_astrbot_data_path()) / "plugin_data" / PLUGIN_NAME
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.pending_additions: dict[tuple[str, str, str], tuple[str, float]] = {}
@@ -65,6 +66,41 @@ class Main(star.Star):
         except Exception:
             logger.exception("Failed to initialize gallery statistics")
             self.stats_store = None
+
+    async def initialize(self):
+        if self.stats_store and (self._broadcast_task is None or self._broadcast_task.done()):
+            self._broadcast_task = asyncio.create_task(self._broadcast_loop())
+
+    async def terminate(self):
+        if self._broadcast_task:
+            self._broadcast_task.cancel()
+            await asyncio.gather(self._broadcast_task, return_exceptions=True)
+            self._broadcast_task = None
+
+    async def _broadcast_loop(self):
+        while True:
+            try:
+                await self._dispatch_boards()
+            except Exception:
+                logger.exception("Annual board scheduler failed")
+            await asyncio.sleep(15)
+
+    async def _dispatch_boards(self):
+        store = self.stats_store
+        jobs = await asyncio.to_thread(store.due_broadcasts, int(time.time()))
+        for job in jobs:
+            try:
+                year = datetime.fromtimestamp(job["send_at"], BEIJING).year
+                parts = await self._board_parts(job["platform_id"], job["group_id"], year, job["bot_id"])
+                if not await asyncio.to_thread(store.claim_broadcast, job["id"], int(time.time())):
+                    continue
+                ok = await asyncio.wait_for(self.context.send_message(job["origin"], MessageChain(parts)), 120)
+                if ok:
+                    await asyncio.to_thread(store.finish_broadcast, job["id"])
+                else:
+                    logger.warning("Annual board delivery was not confirmed for schedule %s", job["id"])
+            except Exception:
+                logger.exception("Failed to send annual board schedule %s", job["id"])
 
     def _max_draw_count(self) -> int:
         """Return the configured positive multi-draw limit."""
@@ -592,6 +628,10 @@ class Main(star.Star):
             category = text[len("年度人物"):].strip()
 
         leaders = store.vote_leaders(platform_id, group_id, year, category)
+        return self._podium_report(year, category, leaders, lines)
+
+    @staticmethod
+    def _podium_report(year, category, leaders, lines):
         title = f"{year} 年度人物 · {category or '总榜'}"
         summary = list(lines)
         lines.append(title)
@@ -620,6 +660,60 @@ class Main(star.Star):
             raise ValueError("Podium renderer returned no image")
         return str(Path(path).resolve())
 
+    async def _board_parts(self, platform_id, group_id, year, bot_id):
+        boards = await asyncio.to_thread(self.stats_store.all_boards, platform_id, group_id, year)
+        if not boards:
+            return [Comp.Plain(f"{year} 年本群暂无年度投票榜单。")]
+        nodes = []
+        for category, leaders in boards:
+            report = self._podium_report(year, category, leaders, [])
+            try:
+                path = await self._render_podium(report, platform_id)
+                content = Comp.Image.fromFileSystem(path)
+            except Exception:
+                logger.exception("Failed to render annual board")
+                content = Comp.Plain(report["text"])
+            nodes.append(Comp.Node(uin=bot_id, name=report["title"], content=[content]))
+        return [Comp.Nodes(nodes)]
+
+    async def _manage_boards(self, event, text, platform_id, group_id):
+        store = self.stats_store
+        if store is None:
+            return event.plain_result("统计数据库暂不可用。")
+        now = datetime.now(BEIJING)
+        if text == "年度榜单汇总":
+            parts = await self._board_parts(platform_id, group_id, now.year, event.get_self_id())
+            return event.chain_result(parts)
+        if not event.is_admin():
+            return event.plain_result("只有管理员可以管理年度榜单。")
+        if text.startswith("删除年度榜单"):
+            category = text[len("删除年度榜单"):].strip()
+            if not category:
+                return event.plain_result("用法：删除年度榜单 奖项名")
+            count = await asyncio.to_thread(store.delete_board, platform_id, group_id, now.year, category)
+            return event.plain_result(f"已删除「{category}」及其 {count} 票，总榜已更新。" if count
+                                      else f"本年没有名为「{category}」的奖项。")
+        argument = text[len("年度榜单定时"):].strip()
+        if not argument:
+            job = await asyncio.to_thread(store.board_schedule, platform_id, group_id)
+            if job:
+                date = datetime.fromtimestamp(job["send_at"], BEIJING)
+                status = "已发送" if job["sent"] else "待发送"
+                return event.plain_result(f"{status} · {date:%Y-%m-%d %H:%M}（北京时间）")
+            return event.plain_result("本群尚未预约。例：年度榜单定时 2026-12-31 20:00（北京时间）")
+        if argument == "取消":
+            removed = await asyncio.to_thread(store.cancel_schedule, platform_id, group_id)
+            return event.plain_result("已取消预约。" if removed else "本群没有待发送的预约。")
+        try:
+            date = datetime.strptime(argument, "%Y-%m-%d %H:%M").replace(tzinfo=BEIJING)
+        except ValueError:
+            return event.plain_result("用法：年度榜单定时 2026-12-31 20:00，或年度榜单定时 取消")
+        if date <= now:
+            return event.plain_result("请设置未来的北京时间。")
+        await asyncio.to_thread(store.schedule_boards, platform_id, group_id, event.unified_msg_origin,
+                                str(event.get_self_id()), int(date.timestamp()))
+        return event.plain_result(f"已预约 {date:%Y-%m-%d %H:%M}（北京时间），届时向本群发送年度榜单汇总。")
+
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=10)
     async def on_group_message(self, event: AstrMessageEvent):
         """Handle gallery commands and pending image additions.
@@ -645,6 +739,15 @@ class Main(star.Star):
             re.sub(r"[^A-Za-z0-9_-]", "_", str(event.get_group_id()))[:80] or "unknown"
         )
         sender_id = str(event.get_sender_id())
+        if re.fullmatch(r"(?:年度榜单汇总|(?:删除年度榜单|年度榜单定时)(?:\s+.+)?)", text):
+            event.stop_event()
+            try:
+                result = await self._manage_boards(event, text, platform_id, group_id)
+            except Exception:
+                logger.exception("Annual board management failed")
+                result = event.plain_result("年度榜单操作失败，请稍后再试。")
+            await event.send(result)
+            return
         if (text.startswith("年度投票") or re.fullmatch(r"年度(?:统计|人物)(?:\s+.+)?", text)):
             event.stop_event()
             try:

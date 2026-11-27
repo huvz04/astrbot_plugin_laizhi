@@ -124,6 +124,7 @@ def install_astrbot_stubs() -> None:
     api.logger = types.SimpleNamespace(exception=lambda *args, **kwargs: None)
     api.star = types.SimpleNamespace(Star=FakeStar, Context=object)
     event.AstrMessageEvent = object
+    event.MessageChain = lambda parts: types.SimpleNamespace(chain=parts)
     event.filter = types.SimpleNamespace(
         EventMessageType=types.SimpleNamespace(GROUP_MESSAGE="group"),
         event_message_type=passthrough_decorator,
@@ -161,6 +162,7 @@ PROJECT_ROOT = Path(__file__).parents[1]
 
 
 class FakeEvent:
+    unified_msg_origin = "test:GroupMessage:100"
     def __init__(self, text: str, *, admin: bool = False) -> None:
         self.message_str = text
         self._messages = [FakePlain(text)]
@@ -443,6 +445,74 @@ class BrowseTests(unittest.TestCase):
                     self.assertIn("成员&lt;1&gt;", html)
                     self.assertEqual(html.count('<article class="rank'), i)
                     self.assertEqual("年度图库统计" in html, command == "年度统计")
+
+    def test_preview_all_and_delete_scoped_board(self):
+        self.plugin._render_podium = AsyncMock(side_effect=RuntimeError("offline"))
+        year = plugin_main.datetime.now(plugin_main.BEIJING).year
+        store = self.plugin.stats_store
+        for group, y, category in (("100", year, "摄影"), ("100", year, "绘画"),
+                                   ("101", year, "摄影"), ("100", year - 1, "摄影")):
+            store.cast_vote("aiocqhttp", group, y, category, "1", "2", "小花")
+        def send(command, admin=False):
+            return run_handler(self.plugin, FakeEvent(command, admin=admin))[0]
+        nodes = send("年度榜单汇总").chain[0].nodes
+        self.assertEqual([n.name.split(" · ")[-1] for n in nodes], ["总榜", "摄影", "绘画"])
+        self.assertIn("2 票", nodes[0].content[0].text)
+        self.assertIn("只有管理员", send("删除年度榜单 摄影").text)
+        self.assertIn("已删除", send("删除年度榜单 摄影", True).text)
+        nodes = send("年度榜单汇总").chain[0].nodes
+        self.assertEqual(len(nodes), 2)
+        self.assertIn("1 票", nodes[0].content[0].text)
+        self.assertTrue(store.vote_leaders("aiocqhttp", "101", year, "摄影"))
+        self.assertTrue(store.vote_leaders("aiocqhttp", "100", year - 1, "摄影"))
+
+    def test_scheduled_board_management_and_delivery_after_restart(self):
+        def send(command, admin=True):
+            return run_handler(self.plugin, FakeEvent(command, admin=admin))[0].text
+        year = plugin_main.datetime.now(plugin_main.BEIJING).year + 1
+        command = f"年度榜单定时 {year}-12-31"
+        self.assertIn("只有管理员", send(command + " 20:00", False))
+        self.assertIn("未来", send("年度榜单定时 2020-01-01 00:00"))
+        self.assertIn("已预约", send(command + " 20:00"))
+        store = self.plugin.stats_store
+        old = store.board_schedule("aiocqhttp", "100")
+        self.assertIn("已预约", send(command + " 21:00"))
+        self.assertIn("21:00", send("年度榜单定时"))
+        self.assertFalse(store.claim_broadcast(old["id"], old["send_at"]))
+        self.assertIn("已取消", send("年度榜单定时 取消"))
+        self.assertIsNone(store.board_schedule("aiocqhttp", "100"))
+        send(command + " 21:00")
+        job = store.board_schedule("aiocqhttp", "100")
+        store.cast_vote("aiocqhttp", "100", year, "摄影", "1", "2", "小花")
+        context = types.SimpleNamespace(send_message=AsyncMock(side_effect=[RuntimeError("offline"), True]))
+        reboot = plugin_main.Main(context, {})
+        reboot._render_podium = AsyncMock(return_value=str(self.group_dir / "mock.png"))
+        async def dispatch(at):
+            with patch.object(plugin_main.time, "time", return_value=at):
+                await reboot._dispatch_boards()
+        asyncio.run(dispatch(job["send_at"] - 1))
+        context.send_message.assert_not_awaited()
+        # Delivery resumes after New Year using the booked year's votes.
+        late = job["send_at"] + 86400
+        asyncio.run(dispatch(late))
+        asyncio.run(dispatch(late + 1))
+        self.assertEqual(context.send_message.await_count, 1)
+        asyncio.run(dispatch(late + 301))
+        asyncio.run(dispatch(late + 601))
+        self.assertEqual(context.send_message.await_count, 2)
+        origin, chain = context.send_message.await_args.args
+        self.assertEqual(origin, FakeEvent.unified_msg_origin)
+        self.assertEqual([n.name for n in chain.chain[0].nodes],
+                         [f"{year} 年度人物 · 总榜", f"{year} 年度人物 · 摄影"])
+        self.assertIn("已发送", send("年度榜单定时"))
+        async def lifecycle():
+            await reboot.initialize()
+            first = reboot._broadcast_task
+            await reboot.initialize()
+            self.assertIs(reboot._broadcast_task, first)
+            await reboot.terminate()
+            self.assertTrue(first.done())
+        asyncio.run(lifecycle())
 
     def test_statistics_sends_three_charts_with_inventory_and_recent_counts(self) -> None:
         write_png(self.group_dir / "猫猫" / "one.png", "red")

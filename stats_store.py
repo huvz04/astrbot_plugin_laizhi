@@ -53,6 +53,13 @@ class GalleryStatsStore:
                     name TEXT NOT NULL,
                     PRIMARY KEY (platform_id, group_id, year, category, voter)
                 );
+                CREATE TABLE IF NOT EXISTS annual_broadcasts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    platform_id TEXT NOT NULL, group_id TEXT NOT NULL,
+                    origin TEXT NOT NULL, bot_id TEXT NOT NULL,
+                    send_at INTEGER NOT NULL, next_try INTEGER NOT NULL, sent INTEGER NOT NULL DEFAULT 0,
+                    UNIQUE(platform_id, group_id)
+                );
                 """
             )
 
@@ -133,19 +140,71 @@ class GalleryStatsStore:
     def vote_leaders(self, platform_id: str, group_id: str, year: int,
                      category: str = "") -> list[sqlite3.Row]:
         with self._connect() as connection:
+            return self._leaders(connection, platform_id, group_id, year, category)
+
+    @staticmethod
+    def _leaders(connection, platform_id, group_id, year, category):
+        query = """
+            SELECT nominee, COALESCE(MAX(NULLIF(name, '')), nominee) AS display_name,
+                   COUNT(*) AS votes
+            FROM annual_votes WHERE platform_id = ? AND group_id = ? AND year = ?
+        """
+        params = [platform_id, group_id, year]
+        if category:
+            query += " AND category = ?"
+            params.append(category)
+        query += " GROUP BY nominee ORDER BY votes DESC, LENGTH(nominee), nominee LIMIT 3"
+        return connection.execute(query, params).fetchall()
+
+    def all_boards(self, platform_id, group_id, year):
+        with self._connect() as connection:
+            connection.execute("BEGIN")
+            scope = (platform_id, group_id, year)
+            categories = [r[0] for r in connection.execute(
+                "SELECT DISTINCT category FROM annual_votes WHERE platform_id=? AND group_id=? AND year=? ORDER BY category",
+                scope)]
+            if not categories:
+                return []
+            return [(category, self._leaders(connection, *scope, category)) for category in ["", *categories]]
+
+    def delete_board(self, platform_id, group_id, year, category):
+        with self._connect() as connection:
             return connection.execute(
-                """
-                SELECT nominee, COALESCE(MAX(NULLIF(name, '')), nominee) AS display_name,
-                       COUNT(*) AS votes
-                FROM annual_votes
-                WHERE platform_id = ? AND group_id = ? AND year = ?
-                  AND (? = '' OR category = ?)
-                GROUP BY nominee
-                ORDER BY votes DESC, LENGTH(nominee), nominee
-                LIMIT 3
-                """,
-                (platform_id, group_id, year, category, category),
-            ).fetchall()
+                "DELETE FROM annual_votes WHERE platform_id=? AND group_id=? AND year=? AND category=?",
+                (platform_id, group_id, year, category)).rowcount
+
+    def schedule_boards(self, platform_id, group_id, origin, bot_id, send_at):
+        with self._connect() as connection:
+            connection.execute("""
+                INSERT OR REPLACE INTO annual_broadcasts
+                    (platform_id, group_id, origin, bot_id, send_at, next_try)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (platform_id, group_id, origin, bot_id, send_at, send_at))
+
+    def board_schedule(self, platform_id, group_id):
+        with self._connect() as connection:
+            return connection.execute("SELECT * FROM annual_broadcasts WHERE platform_id=? AND group_id=?",
+                                      (platform_id, group_id)).fetchone()
+
+    def cancel_schedule(self, platform_id, group_id):
+        with self._connect() as connection:
+            return connection.execute("DELETE FROM annual_broadcasts WHERE platform_id=? AND group_id=? AND sent=0",
+                                      (platform_id, group_id)).rowcount
+
+    def due_broadcasts(self, now):
+        with self._connect() as connection:
+            return connection.execute("SELECT * FROM annual_broadcasts WHERE sent=0 AND next_try<=? ORDER BY send_at",
+                                      (now,)).fetchall()
+
+    def claim_broadcast(self, job_id, now):
+        # Recheck after rendering: an admin may have cancelled or replaced this schedule.
+        with self._connect() as connection:
+            return connection.execute("UPDATE annual_broadcasts SET next_try=? WHERE id=? AND sent=0 AND next_try<=?",
+                                      (now + 300, job_id, now)).rowcount
+
+    def finish_broadcast(self, job_id):
+        with self._connect() as connection:
+            connection.execute("UPDATE annual_broadcasts SET sent=1 WHERE id=?", (job_id,))
 
     def annual_stats(self, platform_id: str, group_id: str, year: int) -> dict:
         start, end = (datetime(y, 1, 1, tzinfo=BEIJING).astimezone(timezone.utc).isoformat()

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -28,7 +29,28 @@ class GalleryStatsStoreTests(unittest.TestCase):
             for platform, group, year in (("qq", "200", 2026), ("foo", "100", 2026), ("qq", "100", 2025)):
                 store.cast_vote(platform, group, year, "摄影", "123", "51", "")
             leaders = GalleryStatsStore(path).vote_leaders("qq", "100", 2026)
-            self.assertEqual([(r["nominee"], r["votes"]) for r in leaders], [("2", 1), ("5", 1), ("11", 1)])
+            self.assertEqual([(r["nominee"], r["votes"]) for r in leaders], [("11", 1), ("2", 1), ("51", 1)])
+
+    def test_nomination_order_survives_revote_migration_and_recreation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "stats.db"
+            store = GalleryStatsStore(path)
+            scope = ("qq", "100", 2026)
+            for category, voter, nominee in [("Z", "1", "99"), ("A", "2", "33"), ("Z", "3", "22")]:
+                store.cast_vote(*scope, category, voter, nominee, "")
+            # Simulate the prior schema and reopen it with existing ballots.
+            with closing(store._connect()) as db:
+                db.execute("DROP TABLE annual_nominations")
+            store = GalleryStatsStore(path)
+            store.cast_vote(*scope, "Z", "1", "22", "")
+            store.cast_vote(*scope, "Z", "4", "99", "")
+            self.assertEqual([r["nominee"] for r in store.vote_leaders(*scope, "Z")], ["22", "99"])
+            store.cast_vote(*scope, "Z", "1", "11", "")
+            self.assertEqual([r["nominee"] for r in store.vote_leaders(*scope, "Z")], ["99", "22", "11"])
+            self.assertEqual([c for c, _ in store.all_boards(*scope)], ["", "Z", "A"])
+            store.delete_board(*scope, "Z")
+            store.cast_vote(*scope, "Z", "1", "99", "")
+            self.assertEqual([c for c, _ in store.all_boards(*scope)], ["", "A", "Z"])
 
     def test_image_record_does_not_reuse_provenance_after_delete_or_clear(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

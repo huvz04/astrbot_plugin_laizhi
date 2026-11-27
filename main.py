@@ -664,17 +664,43 @@ class Main(star.Star):
         boards = await asyncio.to_thread(self.stats_store.all_boards, platform_id, group_id, year)
         if not boards:
             return [Comp.Plain(f"{year} 年本群暂无年度投票榜单。")]
-        nodes = []
-        for category, leaders in boards:
-            report = self._podium_report(year, category, leaders, [])
+        page_size = 10
+        pages = []
+        avatar_cache = {}
+        for offset in range(0, len(boards), page_size):
+            rows = [{"category": category or "总榜", "leaders": [dict(r) for r in leaders]}
+                    for category, leaders in boards[offset:offset + page_size]]
+            title = f"{year} 年度榜单汇总"
+            if len(boards) > page_size:
+                title += f" · {offset // page_size + 1}/{math.ceil(len(boards) / page_size)}"
             try:
-                path = await self._render_podium(report, platform_id)
-                content = Comp.Image.fromFileSystem(path)
+                page_ids = {r["nominee"] for row in rows for r in row["leaders"]}
+                if platform_id == "aiocqhttp":
+                    missing = sorted(page_ids - avatar_cache.keys())
+                    for i in range(0, len(missing), 4):
+                        ids = missing[i:i + 4]
+                        avatars = await asyncio.gather(*(asyncio.to_thread(self._avatar_data, uid) for uid in ids))
+                        avatar_cache.update(zip(ids, avatars))
+                template = (Path(__file__).parent / "templates" / "board_list.html").read_text(encoding="utf-8")
+                page_avatars = {uid: avatar_cache.get(uid, "") for uid in page_ids}
+                path = await self.html_render(template, {"title": title, "rows": rows, "avatars": page_avatars},
+                                              return_url=False, options={"viewport_width": 880, "viewport_height": 100,
+                                                                         "type": "png", "full_page": True})
+                if not path or not Path(path).is_file():
+                    raise ValueError("Board list renderer returned no image")
+                content = Comp.Image.fromFileSystem(str(Path(path).resolve()))
             except Exception:
-                logger.exception("Failed to render annual board")
-                content = Comp.Plain(report["text"])
-            nodes.append(Comp.Node(uin=bot_id, name=report["title"], content=[content]))
-        return [Comp.Nodes(nodes)]
+                logger.exception("Failed to render annual board list")
+                lines = [title]
+                for row in rows:
+                    ranks = "　".join(f"{i}. {r['display_name']}({r['votes']} 票)"
+                                     for i, r in enumerate(row["leaders"], 1))
+                    lines.append(f"{row['category']}　{ranks}")
+                content = Comp.Plain("\n".join(lines))
+            pages.append((title, content))
+        if len(pages) == 1:
+            return [pages[0][1]]
+        return [Comp.Nodes([Comp.Node(uin=bot_id, name=title, content=[content]) for title, content in pages])]
 
     async def _manage_boards(self, event, text, platform_id, group_id):
         store = self.stats_store

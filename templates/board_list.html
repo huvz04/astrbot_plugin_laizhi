@@ -1,0 +1,30 @@
+<!doctype html>
+<!-- Compact award rows inspired by Trophy UI Leaderboard Rankings. See Trophy-LICENSE.txt. -->
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=880, initial-scale=1">
+<style>
+* {box-sizing:border-box}
+body {margin:0;color:#222;background:white;font:22px/1.4 "Noto Sans CJK SC","Microsoft YaHei",sans-serif}
+main {padding:22px 24px 12px}
+h1 {font-size:29px;margin:0 0 16px}
+.row {display:grid;grid-template-columns:1fr repeat(3,1.22fr);align-items:center;gap:14px;padding:16px 6px;border-top:1px solid #dedfe2}
+.category {font-weight:650;overflow-wrap:anywhere}
+.person {display:flex;gap:10px;align-items:center;min-width:0}
+.face {width:47px;height:47px;border-radius:50%;object-fit:cover;flex:none;background:#eff0f3;display:grid;place-items:center;color:#555}
+.detail {min-width:0}
+.name {font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.meta {display:flex;align-items:center;gap:5px;font-size:18px;color:#51545a;font-variant-numeric:tabular-nums}
+.rank {display:inline-flex;align-items:center;gap:2px;font-weight:700;color:#946709}
+.r2 {color:#627081}.r3 {color:#975b38}
+.rank svg {width:19px;height:19px}
+</style></head><body><main>
+<h1>{{ title | e }}</h1>
+{% for row in rows %}
+<div class="row"><div class="category">{{ row.category | e }}</div>
+{% for person in row.leaders %}<div class="person">
+{% if avatars.get(person.nominee) %}<img class="face" alt="" src="{{ avatars[person.nominee] | e }}">
+{% else %}<span class="face">{{ person.display_name[:1] | e }}</span>{% endif %}
+<div class="detail"><div class="name">{{ person.display_name | e }}</div>
+<div class="meta"><span class="rank r{{ loop.index }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M2 6l5 4 5-7 5 7 5-4-3 12H5z M6 21h12"/></svg>{{ loop.index }}</span> · {{ person.votes }} 票</div></div>
+</div>{% endfor %}</div>{% endfor %}
+</main></body></html>

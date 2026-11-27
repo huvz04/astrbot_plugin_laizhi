@@ -60,8 +60,21 @@ class GalleryStatsStore:
                     send_at INTEGER NOT NULL, next_try INTEGER NOT NULL, sent INTEGER NOT NULL DEFAULT 0,
                     UNIQUE(platform_id, group_id)
                 );
+                CREATE TABLE IF NOT EXISTS annual_nominations (
+                    id INTEGER PRIMARY KEY,
+                    platform_id TEXT NOT NULL, group_id TEXT NOT NULL, year INTEGER NOT NULL,
+                    category TEXT NOT NULL, nominee TEXT NOT NULL,
+                    UNIQUE(platform_id, group_id, year, category, nominee)
+                );
                 """
             )
+            # Older votes retain the insertion order of voter slots, but not change history.
+            if not connection.execute("SELECT 1 FROM annual_nominations LIMIT 1").fetchone():
+                connection.execute("""
+                    INSERT OR IGNORE INTO annual_nominations(platform_id, group_id, year, category, nominee)
+                    SELECT platform_id, group_id, year, category, nominee FROM annual_votes
+                    GROUP BY platform_id, group_id, year, category, nominee ORDER BY MIN(rowid)
+                """)
 
     def record(
         self,
@@ -127,6 +140,10 @@ class GalleryStatsStore:
     def cast_vote(self, platform_id: str, group_id: str, year: int, category: str,
                   voter: str, nominee: str, name: str) -> None:
         with self._connect() as connection:
+            connection.execute("""
+                INSERT OR IGNORE INTO annual_nominations(platform_id, group_id, year, category, nominee)
+                VALUES (?, ?, ?, ?, ?)
+            """, (platform_id, group_id, year, category, nominee))
             connection.execute(
                 """
                 INSERT INTO annual_votes (platform_id, group_id, year, category, voter, nominee, name)
@@ -144,24 +161,30 @@ class GalleryStatsStore:
 
     @staticmethod
     def _leaders(connection, platform_id, group_id, year, category):
-        query = """
-            SELECT nominee, COALESCE(MAX(NULLIF(name, '')), nominee) AS display_name,
-                   COUNT(*) AS votes
-            FROM annual_votes WHERE platform_id = ? AND group_id = ? AND year = ?
-        """
+        scope = "platform_id = ? AND group_id = ? AND year = ?"
         params = [platform_id, group_id, year]
         if category:
-            query += " AND category = ?"
+            scope += " AND category = ?"
             params.append(category)
-        query += " GROUP BY nominee ORDER BY votes DESC, LENGTH(nominee), nominee LIMIT 3"
-        return connection.execute(query, params).fetchall()
+        return connection.execute(f"""
+            WITH firsts AS (
+                SELECT nominee, MIN(id) AS first_id FROM annual_nominations
+                WHERE {scope} GROUP BY nominee
+            ), counts AS (
+                SELECT nominee, COALESCE(MAX(NULLIF(name, '')), nominee) AS display_name,
+                       COUNT(*) AS votes FROM annual_votes WHERE {scope} GROUP BY nominee
+            )
+            SELECT counts.* FROM counts JOIN firsts USING (nominee)
+            ORDER BY votes DESC, first_id LIMIT 3
+        """, params + params).fetchall()
 
     def all_boards(self, platform_id, group_id, year):
         with self._connect() as connection:
             connection.execute("BEGIN")
             scope = (platform_id, group_id, year)
             categories = [r[0] for r in connection.execute(
-                "SELECT DISTINCT category FROM annual_votes WHERE platform_id=? AND group_id=? AND year=? ORDER BY category",
+                """SELECT category FROM annual_nominations WHERE platform_id=? AND group_id=? AND year=?
+                   GROUP BY category ORDER BY MIN(id)""",
                 scope)]
             if not categories:
                 return []
@@ -169,6 +192,9 @@ class GalleryStatsStore:
 
     def delete_board(self, platform_id, group_id, year, category):
         with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM annual_nominations WHERE platform_id=? AND group_id=? AND year=? AND category=?",
+                (platform_id, group_id, year, category))
             return connection.execute(
                 "DELETE FROM annual_votes WHERE platform_id=? AND group_id=? AND year=? AND category=?",
                 (platform_id, group_id, year, category)).rowcount

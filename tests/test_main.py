@@ -447,7 +447,8 @@ class BrowseTests(unittest.TestCase):
                     self.assertEqual("年度图库统计" in html, command == "年度统计")
 
     def test_preview_all_and_delete_scoped_board(self):
-        self.plugin._render_podium = AsyncMock(side_effect=RuntimeError("offline"))
+        self.plugin._avatar_data = lambda uid: ""
+        self.plugin.html_render = AsyncMock(side_effect=RuntimeError("offline"))
         year = plugin_main.datetime.now(plugin_main.BEIJING).year
         store = self.plugin.stats_store
         for group, y, category in (("100", year, "摄影"), ("100", year, "绘画"),
@@ -455,16 +456,35 @@ class BrowseTests(unittest.TestCase):
             store.cast_vote("aiocqhttp", group, y, category, "1", "2", "小花")
         def send(command, admin=False):
             return run_handler(self.plugin, FakeEvent(command, admin=admin))[0]
-        nodes = send("年度榜单汇总").chain[0].nodes
-        self.assertEqual([n.name.split(" · ")[-1] for n in nodes], ["总榜", "摄影", "绘画"])
-        self.assertIn("2 票", nodes[0].content[0].text)
+        lines = send("年度榜单汇总").chain[0].text.splitlines()[1:]
+        self.assertEqual([line.split("　")[0] for line in lines], ["总榜", "摄影", "绘画"])
+        self.assertIn("2 票", lines[0])
         self.assertIn("只有管理员", send("删除年度榜单 摄影").text)
         self.assertIn("已删除", send("删除年度榜单 摄影", True).text)
-        nodes = send("年度榜单汇总").chain[0].nodes
-        self.assertEqual(len(nodes), 2)
-        self.assertIn("1 票", nodes[0].content[0].text)
+        lines = send("年度榜单汇总").chain[0].text.splitlines()[1:]
+        self.assertEqual(len(lines), 2)
+        self.assertIn("1 票", lines[0])
         self.assertTrue(store.vote_leaders("aiocqhttp", "101", year, "摄影"))
         self.assertTrue(store.vote_leaders("aiocqhttp", "100", year - 1, "摄影"))
+
+    def test_summary_pages_include_all_categories_and_reuse_avatars(self):
+        from jinja2 import Environment
+        year = plugin_main.datetime.now(plugin_main.BEIJING).year
+        for i in range(11):
+            self.plugin.stats_store.cast_vote("aiocqhttp", "100", year, f"奖<{i}>", "1", "2", "梅")
+        path = self.group_dir / "page.png"
+        write_png(path, "red")
+        self.plugin.html_render = AsyncMock(return_value=str(path))
+        with patch.object(self.plugin, "_avatar_data", return_value="data:image/png;base64,test") as avatar:
+            result = run_handler(self.plugin, FakeEvent("年度榜单汇总"))[0]
+        avatar.assert_called_once_with("2")
+        self.assertEqual(len(result.chain[0].nodes), 2)
+        pages = self.plugin.html_render.await_args_list
+        self.assertEqual([len(c.args[1]["rows"]) for c in pages], [10, 2])
+        template, data = pages[-1].args
+        html = Environment().from_string(template).render(**data)
+        self.assertIn("奖&lt;10&gt;", html)
+        self.assertIn('class="face" alt="" src="data:image/png;base64,test"', html)
 
     def test_scheduled_board_management_and_delivery_after_restart(self):
         def send(command, admin=True):
@@ -486,7 +506,10 @@ class BrowseTests(unittest.TestCase):
         store.cast_vote("aiocqhttp", "100", year, "摄影", "1", "2", "小花")
         context = types.SimpleNamespace(send_message=AsyncMock(side_effect=[RuntimeError("offline"), True]))
         reboot = plugin_main.Main(context, {})
-        reboot._render_podium = AsyncMock(return_value=str(self.group_dir / "mock.png"))
+        reboot._avatar_data = lambda uid: ""
+        preview = self.group_dir / "mock.png"
+        write_png(preview, "red")
+        reboot.html_render = AsyncMock(return_value=str(preview))
         async def dispatch(at):
             with patch.object(plugin_main.time, "time", return_value=at):
                 await reboot._dispatch_boards()
@@ -502,8 +525,10 @@ class BrowseTests(unittest.TestCase):
         self.assertEqual(context.send_message.await_count, 2)
         origin, chain = context.send_message.await_args.args
         self.assertEqual(origin, FakeEvent.unified_msg_origin)
-        self.assertEqual([n.name for n in chain.chain[0].nodes],
-                         [f"{year} 年度人物 · 总榜", f"{year} 年度人物 · 摄影"])
+        self.assertEqual(chain.chain[0].file, str(preview))
+        template, data = reboot.html_render.await_args.args
+        self.assertEqual(data["title"], f"{year} 年度榜单汇总")
+        self.assertEqual([row["category"] for row in data["rows"]], ["总榜", "摄影"])
         self.assertIn("已发送", send("年度榜单定时"))
         async def lifecycle():
             await reboot.initialize()

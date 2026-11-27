@@ -455,7 +455,7 @@ class BrowseTests(unittest.TestCase):
         empty = run_handler(self.plugin, FakeEvent("年度人物"))[0]
         self.assertIn("暂无投票", empty.text)
         renderer.assert_not_called()
-        for i in range(1, 4):
+        for i in range(1, 7):
             vote = FakeEvent("年度投票摄影")
             vote.get_sender_id = lambda: str(i)
             vote._messages.append(FakeAt(str(i), f"成员<{i}>"))
@@ -465,10 +465,11 @@ class BrowseTests(unittest.TestCase):
                     result = run_handler(self.plugin, FakeEvent(command))[0]
                     self.assertEqual(result.image, str(output))
                     template, data = renderer.call_args.args
-                    self.assertEqual([e["rank"] for e in data["entries"]], list(range(1, i + 1)))
+                    self.assertEqual([e["rank"] for e in data["entries"]], list(range(1, min(i, 5) + 1)))
                     html = Environment().from_string(template).render(**data)
                     self.assertIn("成员&lt;1&gt;", html)
-                    self.assertEqual(html.count('<article class="rank'), i)
+                    self.assertEqual(html.count('<article class="rank'), min(i, 3))
+                    self.assertEqual(html.count('<div class="runner">'), max(0, min(5, i) - 3))
                     self.assertEqual("年度图库统计" in html, command == "年度统计")
 
     def test_preview_all_and_delete_scoped_board(self):
@@ -529,7 +530,8 @@ class BrowseTests(unittest.TestCase):
         send(command + " 21:00")
         job = store.board_schedule("aiocqhttp", "100")
         store.cast_vote("aiocqhttp", "100", year, "摄影", "1", "2", "小花")
-        context = types.SimpleNamespace(send_message=AsyncMock(side_effect=[RuntimeError("offline"), True]))
+        store.cast_vote("aiocqhttp", "100", year, "绘画", "2", "3", "小叶")
+        context = types.SimpleNamespace(send_message=AsyncMock(side_effect=[True, RuntimeError("offline"), True, True]))
         reboot = plugin_main.Main(context, {})
         reboot._avatar_data = lambda uid: ""
         preview = self.group_dir / "mock.png"
@@ -543,17 +545,20 @@ class BrowseTests(unittest.TestCase):
         # Delivery resumes after New Year using the booked year's votes.
         late = job["send_at"] + 86400
         asyncio.run(dispatch(late))
+        store.cast_vote("aiocqhttp", "100", year, "新奖", "4", "5", "小禾")
+        reboot = plugin_main.Main(context, {})
+        reboot._avatar_data = lambda uid: ""
+        reboot.html_render = AsyncMock(return_value=str(preview))
         asyncio.run(dispatch(late + 1))
-        self.assertEqual(context.send_message.await_count, 1)
+        self.assertEqual(context.send_message.await_count, 2)
         asyncio.run(dispatch(late + 301))
         asyncio.run(dispatch(late + 601))
-        self.assertEqual(context.send_message.await_count, 2)
+        self.assertEqual(context.send_message.await_count, 4)
         origin, chain = context.send_message.await_args.args
         self.assertEqual(origin, FakeEvent.unified_msg_origin)
         self.assertEqual(chain.chain[0].file, str(preview))
-        template, data = reboot.html_render.await_args.args
-        self.assertEqual(data["title"], f"{year} 年度榜单汇总")
-        self.assertEqual([row["category"] for row in data["rows"]], ["总榜", "摄影"])
+        titles = [call.args[1]["title"] for call in reboot.html_render.await_args_list]
+        self.assertEqual(titles, [f"{year} 年度人物 · 摄影", f"{year} 年度人物 · 绘画"])
         self.assertIn("已发送", send("年度榜单定时"))
         async def lifecycle():
             await reboot.initialize()

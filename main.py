@@ -92,14 +92,27 @@ class Main(star.Star):
         for job in jobs:
             try:
                 year = datetime.fromtimestamp(job["send_at"], BEIJING).year
-                parts = await self._board_parts(job["platform_id"], job["group_id"], year, job["bot_id"])
-                if not await asyncio.to_thread(store.claim_broadcast, job["id"], int(time.time())):
-                    continue
-                ok = await asyncio.wait_for(self.context.send_message(job["origin"], MessageChain(parts)), 120)
-                if ok:
-                    await asyncio.to_thread(store.finish_broadcast, job["id"])
-                else:
-                    logger.warning("Annual board delivery was not confirmed for schedule %s", job["id"])
+                boards = await asyncio.to_thread(store.broadcast_boards, job, year)
+                total = max(1, len(boards))
+                for index in range(job["board_index"], total):
+                    if boards:
+                        category, leaders = boards[index]
+                        report = self._podium_report(year, category, leaders, [])
+                        try:
+                            path = await self._render_podium(report, job["platform_id"])
+                            part = Comp.Image.fromFileSystem(path)
+                        except Exception:
+                            logger.exception("Failed to render scheduled podium")
+                            part = Comp.Plain(report["text"])
+                    else:
+                        part = Comp.Plain(f"{year} 年本群暂无年度投票榜单。")
+                    if not await asyncio.to_thread(store.claim_broadcast, job["id"], int(time.time()), index):
+                        break
+                    ok = await asyncio.wait_for(self.context.send_message(job["origin"], MessageChain([part])), 120)
+                    if not ok:
+                        logger.warning("Annual board delivery was not confirmed for schedule %s", job["id"])
+                        break
+                    await asyncio.to_thread(store.advance_broadcast, job["id"], index, index + 1 == total)
             except Exception:
                 logger.exception("Failed to send annual board schedule %s", job["id"])
 
@@ -689,7 +702,7 @@ class Main(star.Star):
         pages = []
         avatar_cache = {}
         for offset in range(0, len(boards), page_size):
-            rows = [{"category": category or "总榜", "leaders": [dict(r) for r in leaders]}
+            rows = [{"category": category or "总榜", "leaders": [dict(r) for r in leaders[:3]]}
                     for category, leaders in boards[offset:offset + page_size]]
             title = f"{year} 年度榜单汇总"
             if len(boards) > page_size:
@@ -759,7 +772,7 @@ class Main(star.Star):
             return event.plain_result("请设置未来的北京时间。")
         await asyncio.to_thread(store.schedule_boards, platform_id, group_id, event.unified_msg_origin,
                                 str(event.get_self_id()), int(date.timestamp()))
-        return event.plain_result(f"已预约 {date:%Y-%m-%d %H:%M}（北京时间），届时向本群发送年度榜单汇总。")
+        return event.plain_result(f"已预约 {date:%Y-%m-%d %H:%M}（北京时间），届时先发总榜，再依次发送各奖项前五名。")
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=10)
     async def on_group_message(self, event: AstrMessageEvent):

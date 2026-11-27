@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -69,6 +70,12 @@ class GalleryStatsStore:
                 """
             )
             # Older votes retain the insertion order of voter slots, but not change history.
+            connection.execute("BEGIN IMMEDIATE")
+            columns = {row["name"] for row in connection.execute("PRAGMA table_info(annual_broadcasts)")}
+            if "boards_json" not in columns:
+                connection.execute("ALTER TABLE annual_broadcasts ADD COLUMN boards_json TEXT")
+            if "board_index" not in columns:
+                connection.execute("ALTER TABLE annual_broadcasts ADD COLUMN board_index INTEGER NOT NULL DEFAULT 0")
             if not connection.execute("SELECT 1 FROM annual_nominations LIMIT 1").fetchone():
                 connection.execute("""
                     INSERT OR IGNORE INTO annual_nominations(platform_id, group_id, year, category, nominee)
@@ -179,7 +186,7 @@ class GalleryStatsStore:
                        COUNT(*) AS votes FROM annual_votes WHERE {scope} GROUP BY nominee
             )
             SELECT counts.* FROM counts JOIN firsts USING (nominee)
-            ORDER BY votes DESC, first_id LIMIT 3
+            ORDER BY votes DESC, first_id LIMIT 5
         """, params + params).fetchall()
 
     def all_boards(self, platform_id, group_id, year):
@@ -226,15 +233,28 @@ class GalleryStatsStore:
             return connection.execute("SELECT * FROM annual_broadcasts WHERE sent=0 AND next_try<=? ORDER BY send_at",
                                       (now,)).fetchall()
 
-    def claim_broadcast(self, job_id, now):
+    def broadcast_boards(self, job, year):
+        if job["boards_json"] is not None:
+            return json.loads(job["boards_json"])
+        boards = [(name, [dict(row) for row in rows])
+                  for name, rows in self.all_boards(job["platform_id"], job["group_id"], year)]
+        with self._connect() as connection:
+            connection.execute("UPDATE annual_broadcasts SET boards_json=? WHERE id=? AND boards_json IS NULL",
+                               (json.dumps(boards, ensure_ascii=False), job["id"]))
+            saved = connection.execute("SELECT boards_json FROM annual_broadcasts WHERE id=?", (job["id"],)).fetchone()
+        return json.loads(saved[0]) if saved else []
+
+    def claim_broadcast(self, job_id, now, index=0):
         # Recheck after rendering: an admin may have cancelled or replaced this schedule.
         with self._connect() as connection:
-            return connection.execute("UPDATE annual_broadcasts SET next_try=? WHERE id=? AND sent=0 AND next_try<=?",
-                                      (now + 300, job_id, now)).rowcount
+            return connection.execute("""UPDATE annual_broadcasts SET next_try=?
+                                      WHERE id=? AND sent=0 AND next_try<=? AND board_index=?""",
+                                      (now + 300, job_id, now, index)).rowcount
 
-    def finish_broadcast(self, job_id):
+    def advance_broadcast(self, job_id, index, finished):
         with self._connect() as connection:
-            connection.execute("UPDATE annual_broadcasts SET sent=1 WHERE id=?", (job_id,))
+            connection.execute("""UPDATE annual_broadcasts SET sent=?, board_index=?, next_try=0
+                               WHERE id=? AND board_index=?""", (finished, index + 1, job_id, index))
 
     def annual_stats(self, platform_id: str, group_id: str, year: int) -> dict:
         start, end = (datetime(y, 1, 1, tzinfo=BEIJING).astimezone(timezone.utc).isoformat()

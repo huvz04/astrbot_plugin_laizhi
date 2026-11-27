@@ -29,7 +29,7 @@ class GalleryStatsStoreTests(unittest.TestCase):
             for platform, group, year in (("qq", "200", 2026), ("foo", "100", 2026), ("qq", "100", 2025)):
                 store.cast_vote(platform, group, year, "摄影", "123", "51", "")
             leaders = GalleryStatsStore(path).vote_leaders("qq", "100", 2026)
-            self.assertEqual([(r["nominee"], r["votes"]) for r in leaders], [("11", 1), ("2", 1), ("51", 1)])
+            self.assertEqual([(r["nominee"], r["votes"]) for r in leaders], [("11", 1), ("2", 1), ("51", 1), ("5", 1)])
 
     def test_nomination_order_survives_revote_migration_and_recreation(self):
         with tempfile.TemporaryDirectory() as directory:

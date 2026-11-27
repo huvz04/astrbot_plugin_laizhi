@@ -18,11 +18,14 @@ article { text-align: center; min-width: 0; width: 160px; }
 .crown { position: absolute; bottom: -5px; right: -5px; width: 41px; height: 41px; padding: 7px; color: var(--ink); background: white; border-radius: 50%; box-shadow: 0 1px 4px #0002 }
 .name { white-space: nowrap; text-overflow: ellipsis; overflow: hidden; font-weight: 600 }
 .votes { color: #666; font-size: 22px; font-variant-numeric: tabular-nums }
+.runner { display: grid; grid-template-columns: 40px 52px minmax(0, 1fr) auto; align-items: center;
+  gap: 14px; border-top: 1px solid #ddd; padding: 12px 4px }
+.runner .avatar { width: 48px; height: 48px; background: #eee; font-size: 23px }
 .block { margin-top: 14px; padding-top: 6px; height: var(--height); background: var(--fill); color: var(--ink); border-radius: 14px 14px 0 0; font-size: 31px; font-weight: bold }
 </style></head><body><main>
 {% if summary %}<header>{% for line in summary %}<div>{{ line | e }}</div>{% endfor %}</header>{% endif %}
 <h1>{{ title | e }}</h1>
-<div class="podium">{% for item in entries %}
+<div class="podium">{% for item in entries[:3] %}
 <article class="rank{{ item.rank }}">
   <div class="portrait">
     {% if item.avatar %}<img class="avatar" alt="" src="{{ item.avatar | e }}">
@@ -32,4 +35,8 @@ article { text-align: center; min-width: 0; width: 160px; }
   <div class="name">{{ item.display_name | e }}</div><div class="votes">{{ item.votes }} 票</div>
   <div class="block">{{ item.rank }}</div>
 </article>{% endfor %}</div>
-</main></body></html>
+{% for item in entries[3:] %}
+<div class="runner"><b>{{ item.rank }}</b>
+{% if item.avatar %}<img class="avatar" alt="" src="{{ item.avatar | e }}">{% else %}<span class="avatar">{{ item.display_name[:1] | e }}</span>{% endif %}
+<span class="name">{{ item.display_name | e }}</span><span class="votes">{{ item.votes }} 票</span></div>
+{% endfor %}</main></body></html>

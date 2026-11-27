@@ -853,26 +853,38 @@ class Main(star.Star):
             return
         if re.fullmatch(r"年度(?:来只|人物)(?:\s+.+)?", text):
             event.stop_event()
+            trace = f"[来只年报 {uuid.uuid4().hex[:8]}] {text[:4]}"
+            logger.info(f"{trace} 收到命令")
             try:
                 reply = await asyncio.to_thread(self._annual_reply, text, platform_id, group_id)
             except Exception:
-                logger.exception("Annual statistics or vote failed")
+                logger.exception(f"{trace} 读取年度数据失败")
                 reply = "年度数据读写失败，请稍后重试。"
             if isinstance(reply, dict):
                 try:
+                    logger.info(f"{trace} 数据已就绪，开始生成图片")
                     image = await self._render_podium(reply, platform_id)
                 except Exception:
-                    logger.exception("Failed to render annual podium")
+                    logger.exception(f"{trace} 图片生成失败，改发文字")
                 else:
+                    logger.info(f"{trace} PNG 已生成，开始发送")
                     try:
                         await event.send(event.chain_result([image]))
+                        logger.info(f"{trace} 图片发送成功")
                         return
                     except Exception as exc:
                         if not self._unsupported_file(exc):
+                            logger.exception(f"{trace} 图片发送失败")
                             raise
-                        logger.exception("OneBot rejected annual podium image")
+                        logger.exception(f"{trace} OneBot 拒绝图片格式，改发文字")
                 reply = reply["text"]
-            await event.send(event.plain_result(reply))
+            logger.info(f"{trace} 开始发送文字")
+            try:
+                await event.send(event.plain_result(reply))
+            except Exception:
+                logger.exception(f"{trace} 文字发送失败")
+                raise
+            logger.info(f"{trace} 文字发送成功")
             return
         for key, (_, deadline) in tuple(self.pending_additions.items()):
             if deadline <= now:

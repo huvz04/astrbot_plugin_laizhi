@@ -125,7 +125,7 @@ def install_astrbot_stubs() -> None:
     media_utils = types.ModuleType("astrbot.core.utils.media_utils")
     quoted_message = types.ModuleType("astrbot.core.utils.quoted_message")
 
-    api.logger = types.SimpleNamespace(exception=lambda *args, **kwargs: None)
+    api.logger = types.SimpleNamespace(exception=lambda *args, **kwargs: None, info=lambda *args: None)
     api.star = types.SimpleNamespace(Star=FakeStar, Context=object)
     event.AstrMessageEvent = object
     event.MessageChain = lambda parts: types.SimpleNamespace(chain=parts)

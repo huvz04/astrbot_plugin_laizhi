@@ -414,7 +414,9 @@ class BrowseTests(unittest.TestCase):
         single = run_handler(self.plugin, FakeEvent("年度人物 女声优痴"))[0].text
         self.assertIn("333　1 票", single)
         self.assertNotIn("222", single)
-        self.assertIn("333　2 票", run_handler(self.plugin, FakeEvent("年度统计"))[0].text)
+        self.assertIn("333　2 票", run_handler(self.plugin, FakeEvent("年度来只"))[0].text)
+        self.assertIn("2020 年度图库统计", run_handler(self.plugin, FakeEvent("年度来只 2020"))[0].text)
+        self.assertEqual(run_handler(self.plugin, FakeEvent("年度统计")), [])
         for mentions in ([], [FakeAt("all")], [FakeAt("222"), FakeAt("333")]):
             event = FakeEvent("年度投票女声优痴")
             event._messages.extend(mentions)
@@ -460,7 +462,7 @@ class BrowseTests(unittest.TestCase):
             vote.get_sender_id = lambda: str(i)
             vote._messages.append(FakeAt(str(i), f"成员<{i}>"))
             run_handler(self.plugin, vote)
-            for command in ("年度人物", "年度人物 摄影", "年度统计"):
+            for command in ("年度人物", "年度人物 摄影", "年度来只"):
                 with self.subTest(command=command, count=i):
                     result = run_handler(self.plugin, FakeEvent(command))[0]
                     self.assertEqual(result.image, str(output))
@@ -470,7 +472,7 @@ class BrowseTests(unittest.TestCase):
                     self.assertIn("成员&lt;1&gt;", html)
                     self.assertEqual(html.count('<article class="rank'), min(i, 3))
                     self.assertEqual(html.count('<div class="runner">'), max(0, min(5, i) - 3))
-                    self.assertEqual("年度图库统计" in html, command == "年度统计")
+                    self.assertEqual("年度图库统计" in html, command == "年度来只")
 
     def test_preview_all_and_delete_scoped_board(self):
         self.plugin._avatar_data = lambda uid: ""

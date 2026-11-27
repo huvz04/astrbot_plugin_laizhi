@@ -641,10 +641,10 @@ class Main(star.Star):
         if store is None:
             return "统计数据库暂不可用，请稍后重试。"
         year = datetime.now(BEIJING).year
-        if text.startswith("年度统计"):
-            match = re.fullmatch(r"年度统计(?:\s+([1-9][0-9]{3}))?", text)
+        if text.startswith("年度来只"):
+            match = re.fullmatch(r"年度来只(?:\s+([1-9][0-9]{3}))?", text)
             if not match or match[1] == "9999":
-                return "请发送「年度统计」或「年度统计 2026」。"
+                return "请发送「年度来只」或「年度来只 2026」。"
             year = int(match[1]) if match[1] else year
             data = store.annual_stats(platform_id, group_id, year)
             lines = [f"{year} 年度图库统计"]
@@ -835,7 +835,7 @@ class Main(star.Star):
                 result = event.plain_result("年度榜单操作失败，请稍后再试。")
             await event.send(result)
             return
-        if re.fullmatch(r"年度(?:统计|人物)(?:\s+.+)?", text):
+        if re.fullmatch(r"年度(?:来只|人物)(?:\s+.+)?", text):
             event.stop_event()
             try:
                 reply = await asyncio.to_thread(self._annual_reply, text, platform_id, group_id)

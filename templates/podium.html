@@ -1,0 +1,35 @@
+<!doctype html>
+<!-- Static adaptation of Trophy UI's LeaderboardPodium, see Trophy-LICENSE.txt. -->
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=720, initial-scale=1">
+<style>
+* { box-sizing: border-box }
+body { margin: 0; background: white; color: #191919; font: 24px/1.4 "Noto Sans CJK SC","Microsoft YaHei",sans-serif }
+main { padding: 28px 32px 24px; width: 100% }
+h1 { margin: 0 0 24px; font-size: 29px; overflow-wrap: anywhere }
+header { margin-bottom: 24px; font-size: 19px; color: #555; overflow-wrap: anywhere }
+.podium { display: flex; gap: 28px; justify-content: center; align-items: flex-end }
+article { text-align: center; min-width: 0; width: 160px; }
+.rank1 { order: 2; --ink: #bb890f; --fill: #f5df88; --height: 224px }
+.rank2 { order: 1; --ink: #768292; --fill: #e3e6ea; --height: 168px }
+.rank3 { order: 3; --ink: #ab6d3e; --fill: #eac7ab; --height: 140px }
+.portrait { position: relative; width: 98px; height: 98px; margin: 0 auto 14px }
+.avatar { display: grid; place-items: center; height: 100%; width: 100%; border-radius: 50%; object-fit: cover; background: var(--fill); font-size: 40px }
+.crown { position: absolute; bottom: -5px; right: -5px; width: 41px; height: 41px; padding: 7px; color: var(--ink); background: white; border-radius: 50%; box-shadow: 0 1px 4px #0002 }
+.name { white-space: nowrap; text-overflow: ellipsis; overflow: hidden; font-weight: 600 }
+.votes { color: #666; font-size: 22px; font-variant-numeric: tabular-nums }
+.block { margin-top: 14px; padding-top: 6px; height: var(--height); background: var(--fill); color: var(--ink); border-radius: 14px 14px 0 0; font-size: 31px; font-weight: bold }
+</style></head><body><main>
+{% if summary %}<header>{% for line in summary %}<div>{{ line | e }}</div>{% endfor %}</header>{% endif %}
+<h1>{{ title | e }}</h1>
+<div class="podium">{% for item in entries %}
+<article class="rank{{ item.rank }}">
+  <div class="portrait">
+    {% if item.avatar %}<img class="avatar" alt="" src="{{ item.avatar | e }}">
+    {% else %}<span class="avatar">{{ item.display_name[:1] | e }}</span>{% endif %}
+    <svg class="crown" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" aria-hidden="true"><path d="M2 6l5 4 5-7 5 7 5-4-3 12H5z M6 21h12"/></svg>
+  </div>
+  <div class="name">{{ item.display_name | e }}</div><div class="votes">{{ item.votes }} 票</div>
+  <div class="block">{{ item.rank }}</div>
+</article>{% endfor %}</div>
+</main></body></html>

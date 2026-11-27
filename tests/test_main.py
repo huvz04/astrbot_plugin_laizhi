@@ -9,7 +9,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from PIL import Image as PillowImage
 
@@ -401,6 +401,8 @@ class BrowseTests(unittest.TestCase):
                 self.assertEqual(data["popular"][0]["count"], total)
 
     def test_annual_vote_commands(self) -> None:
+        # A renderer outage still returns the entire readable ranking.
+        self.plugin._render_podium = AsyncMock(side_effect=RuntimeError("renderer offline"))
         for category, target in (("女声优痴", "222"), ("女声优痴", "333"),
                                  ("女声优痴", "333"), ("摄影", "333")):
             event = FakeEvent(f"年度投票{category} ")
@@ -415,6 +417,32 @@ class BrowseTests(unittest.TestCase):
             event = FakeEvent("年度投票女声优痴")
             event._messages.extend(mentions)
             self.assertIn("请发送", run_handler(self.plugin, event)[0].text)
+
+    def test_annual_podium_uses_real_ranks_and_preserves_report(self) -> None:
+        from jinja2 import Environment
+        output = Path(self.temp_dir.name) / "podium.png"
+        write_png(output, "white")
+        renderer = AsyncMock(return_value=str(output))
+        self.plugin.html_render = renderer
+        self.plugin._avatar_data = lambda user_id: ""
+        empty = run_handler(self.plugin, FakeEvent("年度人物"))[0]
+        self.assertIn("暂无投票", empty.text)
+        renderer.assert_not_called()
+        for i in range(1, 4):
+            vote = FakeEvent("年度投票摄影")
+            vote.get_sender_id = lambda: str(i)
+            vote._messages.append(FakeAt(str(i), f"成员<{i}>"))
+            run_handler(self.plugin, vote)
+            for command in ("年度人物", "年度人物 摄影", "年度统计"):
+                with self.subTest(command=command, count=i):
+                    result = run_handler(self.plugin, FakeEvent(command))[0]
+                    self.assertEqual(result.image, str(output))
+                    template, data = renderer.call_args.args
+                    self.assertEqual([e["rank"] for e in data["entries"]], list(range(1, i + 1)))
+                    html = Environment().from_string(template).render(**data)
+                    self.assertIn("成员&lt;1&gt;", html)
+                    self.assertEqual(html.count('<article class="rank'), i)
+                    self.assertEqual("年度图库统计" in html, command == "年度统计")
 
     def test_statistics_sends_three_charts_with_inventory_and_recent_counts(self) -> None:
         write_png(self.group_dir / "猫猫" / "one.png", "red")

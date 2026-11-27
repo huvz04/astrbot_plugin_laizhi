@@ -555,7 +555,7 @@ class Main(star.Star):
         return "\n".join(lines)
 
     def _annual_reply(self, text: str, components: list, platform_id: str,
-                      group_id: str, sender_id: str) -> str:
+                      group_id: str, sender_id: str) -> str | dict:
         store = self.stats_store
         if store is None:
             return "统计数据库暂不可用，请稍后重试。"
@@ -592,12 +592,33 @@ class Main(star.Star):
             category = text[len("年度人物"):].strip()
 
         leaders = store.vote_leaders(platform_id, group_id, year, category)
-        lines.append(f"{year} 年度人物 · {category or '总榜'}")
+        title = f"{year} 年度人物 · {category or '总榜'}"
+        summary = list(lines)
+        lines.append(title)
         lines.extend(f"{i}. {row['display_name']}　{row['votes']} 票"
                      for i, row in enumerate(leaders, 1))
         if not leaders:
             lines.append("暂无投票")
-        return "\n".join(lines)
+            return "\n".join(lines)
+        return {"title": title, "summary": summary, "leaders": [dict(row) for row in leaders],
+                "text": "\n".join(lines)}
+
+    async def _render_podium(self, report: dict, platform_id: str) -> str:
+        template_path = Path(__file__).parent / "templates" / "podium.html"
+        template = await asyncio.to_thread(template_path.read_text, encoding="utf-8")
+        leaders = report["leaders"]
+        avatars = await asyncio.gather(*(asyncio.to_thread(self._avatar_data, row["nominee"])
+                                         for row in leaders)) if platform_id == "aiocqhttp" else [""] * len(leaders)
+        entries = [{**row, "rank": rank, "avatar": avatar}
+                   for rank, (row, avatar) in enumerate(zip(leaders, avatars), 1)]
+        path = await self.html_render(
+            template, {"title": report["title"], "summary": report["summary"], "entries": entries},
+            return_url=False, options={"viewport_width": 720, "viewport_height": 100,
+                                       "type": "png", "full_page": True},
+        )
+        if not path or not Path(path).is_file():
+            raise ValueError("Podium renderer returned no image")
+        return str(Path(path).resolve())
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=10)
     async def on_group_message(self, event: AstrMessageEvent):
@@ -633,7 +654,16 @@ class Main(star.Star):
             except Exception:
                 logger.exception("Annual statistics or vote failed")
                 reply = "年度数据读写失败，请稍后重试。"
-            yield event.plain_result(reply)
+            if isinstance(reply, dict):
+                try:
+                    path = await self._render_podium(reply, platform_id)
+                    result = event.image_result(path)
+                except Exception:
+                    logger.exception("Failed to render annual podium")
+                    result = event.plain_result(reply["text"])
+            else:
+                result = event.plain_result(reply)
+            await event.send(result)
             return
         pending_key = (platform_id, group_id, sender_id)
         now = time.monotonic()
